@@ -637,10 +637,51 @@ export const napi = {
     return NAPI_OK;
   },
   napi_create_bigint_words(env_id, sign_bit, word_count, words, result) {
-    throw new Error('not implemented');
-  },
-  napi_get_value_bigint_words() {
+    let env = environments[env_id];
+    let buf = env.u64;
+    let ptr = words >> 3;
+    let res = 0n;
+    let shift = 0n;
 
+    for (let i = 0; i < word_count; i++) {
+      let word = buf[ptr++];
+      res += word << shift;
+      shift += 64n;
+    }
+
+    res *= BigInt((-1) ** sign_bit);
+    return env.createValue(res, result);
+  },
+  napi_get_value_bigint_words(env_id, value, sign_bit, word_count, words) {
+    let env = environments[env_id];
+    let val = env.get(value);
+    let count = env.u32[word_count >> 2];
+
+    if (sign_bit) {
+      env.i32[sign_bit] = val < 0n ? 1 : 0;
+    }
+
+    let i = 0;
+    if (words) {
+      let mask = (1n << 64n) - 1n;
+      let buf = env.u64;
+      let ptr = words >> 3;
+      if (val < 0n) {
+        val = -val;
+      }
+
+      for (; i < count && val !== 0n; i++) {
+        buf[ptr++] = val & mask;
+        val >>= 64n;
+      }
+    }
+
+    while (val > 0n) {
+      i++;
+      val >>= 64n;
+    }
+
+    return env.setPointer(word_count, i);
   },
   napi_get_null(env_id, result) {
     let env = environments[env_id];
