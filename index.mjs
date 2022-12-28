@@ -118,12 +118,6 @@ export class Environment {
     } else if (value === globalThis) {
       this.setPointer(result, 2);
       return NAPI_OK;
-    } else if (value instanceof ArrayBuffer) {
-      
-    } else if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
-
-    } else if (typedArrays.some(t => value instanceof t)) {
-
     }
 
     let id = this.pushValue(value);
@@ -321,26 +315,6 @@ const finalizationRegistry = new FinalizationRegistry(buffer => {
     buffer.finalize(buffer.env, buffer.data, buffer.hint);
   }
 });
-
-class BufferValue {
-  constructor(env, data, length, finalize, finalizeHint) {
-    this.env = env;
-    this.data = data;
-    this.length = length;
-
-    if (finalize) {
-      finalizationRegistry.register(this, new FinalizeRecord(env.id, finalize, finalizeHint, data));
-    }
-  }
-
-  get() {
-    return this.env.memory.subarray(this.data, this.data + this.length);
-  }
-
-  toString() {
-    return decoder.decode(this.get());
-  }
-}
 
 class ExternalValue {}
 
@@ -1162,7 +1136,7 @@ export const napi = {
   napi_is_buffer(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
-    env.memory[result] = val instanceof BufferValue ? 1 : 0;
+    env.memory[result] = (typeof Buffer !== 'undefined' ? Buffer.isBuffer(val) : val instanceof Uint8Array) ? 1 : 0;
     return NAPI_OK;
   },
   napi_is_date(env_id, value, result) {
