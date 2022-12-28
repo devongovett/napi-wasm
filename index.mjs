@@ -218,7 +218,7 @@ export class Environment {
   }
 
   copyBuffer(data) {
-    let ptr = this.instance.exports.wasm_malloc(data.byteLength);
+    let ptr = this.instance.exports.napi_wasm_malloc(data.byteLength);
     let mem = this.memory;
     mem.set(data, ptr);
     let buf = mem.subarray(ptr, ptr + data.byteLength);
@@ -899,7 +899,7 @@ export const napi = {
   },
   napi_create_buffer(env_id, length, data, result) {
     let env = environments[env_id];
-    let ptr = env.instance.exports.wasm_malloc(length);
+    let ptr = env.instance.exports.napi_wasm_malloc(length);
     if (data) {
       env.setPointer(data, ptr);
     }
@@ -912,7 +912,7 @@ export const napi = {
   },
   napi_create_buffer_copy(env_id, length, data, result_data, result) {
     let env = environments[env_id];
-    let ptr = env.instance.exports.wasm_malloc(length);
+    let ptr = env.instance.exports.napi_wasm_malloc(length);
     env.memory.set(env.memory.subarray(data, data + length), ptr);
     if (result_data) {
       env.setPointer(result_data, ptr);
