@@ -1,6 +1,8 @@
 const NAPI_OK = 0;
 const NAPI_GENERIC_FAILURE = 9;
+const NAPI_PENDING_EXCEPTION = 10;
 const NAPI_HANDLE_SCOPE_MISMATCH = 13;
+const NAPI_NO_EXTERNAL_BUFFERS_ALLOWED = 22;
 
 // https://nodejs.org/api/n-api.html#napi_property_attributes
 const NAPI_WRITABLE = 1 << 0;
@@ -8,14 +10,32 @@ const NAPI_ENUMERABLE = 1 << 1;
 const NAPI_CONFIGURABLE = 1 << 2;
 const NAPI_STATIC = 1 << 10;
 
+// https://nodejs.org/api/n-api.html#napi_typedarray_type
+const typedArrays = [
+  Int8Array,
+  Uint8Array,
+  Uint8ClampedArray,
+  Int16Array,
+  Uint16Array,
+  Int32Array,
+  Uint32Array,
+  Float32Array,
+  Float64Array,
+  BigInt64Array,
+  BigUint64Array
+];
+
 const environments = [];
 
 export class Environment {
   scopes = [];
-  references = [];
+  referenceId = 1;
+  references = new Map();
   wrappedObjects = new WeakMap();
   externalObjects = new WeakMap();
-  pendingException;
+  buffers = new Map();
+  instanceData = 0;
+  pendingException = null;
 
   constructor(instance) {
     this.id = environments.length;
@@ -61,6 +81,13 @@ export class Environment {
 
   popScope() {
     this.scopes.pop();
+
+    // Update any buffers with values which might have been modified in WASM copy.
+    for (let [buffer, slice] of this.buffers) {
+      buffer.set(slice);
+    }
+
+    this.buffers.clear();
   }
 
   get(idx) {
@@ -91,6 +118,12 @@ export class Environment {
     } else if (value === globalThis) {
       this.setPointer(result, 2);
       return NAPI_OK;
+    } else if (value instanceof ArrayBuffer) {
+      
+    } else if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
+
+    } else if (typedArrays.some(t => value instanceof t)) {
+
     }
 
     let id = this.pushValue(value);
@@ -119,6 +152,15 @@ export class Environment {
     }
 
     return this._i32;
+  }
+
+  _u16 = new Uint16Array();
+  get u16() {
+    if (this._u16.byteLength === 0) {
+      this._u16 = new Uint16Array(this.instance.exports.memory.buffer);
+    }
+
+    return this._u16;
   }
 
   _u64 = new BigUint64Array();
@@ -157,11 +199,37 @@ export class Environment {
     return this._buf;
   }
 
-  createBuffer(data) {
+  getBufferInfo(buf, ptr) {
+    if (this.buffers.has(buf)) {
+      let b = this.buffers.get(buf);
+      this.setPointer(ptr, b.byteOffset);
+      return b.byteLength;
+    }
+
+    if (buf instanceof ArrayBuffer) {
+      let b = this.copyBuffer(new Uint8Array(buf));
+      this.setPointer(ptr, b.byteOffset);
+      return b.byteLength;
+    }
+
+    // If this is a view into WASM memory, no copies needed.
+    if (buf.buffer === this.instance.exports.memory.buffer) {
+      this.setPointer(ptr, buf.byteOffset);
+      return buf.byteLength;
+    }
+
+    let b = this.copyBuffer(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+    this.setPointer(ptr, b.byteOffset);
+    return b.byteLength;
+  }
+
+  copyBuffer(data) {
     let ptr = this.instance.exports.wasm_malloc(data.byteLength);
     let mem = this.memory;
     mem.set(data, ptr);
-    return new BufferValue(this, ptr, data.byteLength, null, null);
+    let buf = mem.subarray(ptr, ptr + data.byteLength);
+    this.buffers.set(data, buf);
+    return buf;
   }
 
   createFunction(cb, data) {
@@ -216,16 +284,21 @@ export class Environment {
     let set = setter ? this.createFunction(setter, data) : undefined;
     let value = method ? this.createFunction(method, data) : val ? this.get(val) : undefined;
 
-    return {
+    let descriptor = {
       name,
-      writable,
-      enumerable,
-      configurable,
       static: isStatic,
-      get,
-      set,
-      value
+      configurable,
+      enumerable
     };
+    if (get || set) {
+      descriptor.get = get;
+      descriptor.set = set;
+    } else if (value) {
+      descriptor.writable = writable;
+      descriptor.value = value;
+    }
+
+    return descriptor;
   }
 }
 
@@ -389,7 +462,7 @@ export const napi = {
     let ptr = properties >> 2;
     for (let i = 0; i < property_count; i++) {
       let descriptor = env.readPropertyDescriptor(ptr);
-      Object.defineProperty(object, descriptor.name, descriptor);
+      Object.defineProperty(obj, descriptor.name, descriptor);
       ptr += 8;
     }
     return NAPI_OK;
@@ -435,8 +508,8 @@ export const napi = {
   },
   napi_create_reference(env_id, value, refcount, result) {
     let env = environments[env_id];
-    let id = env.references.length;
-    env.references.push({
+    let id = env.referenceId++;
+    env.references.set(id, {
       value: env.get(value),
       refcount
     });
@@ -444,23 +517,23 @@ export const napi = {
   },
   napi_delete_reference(env_id, ref) {
     let env = environments[env_id];
-    env.references[ref] = undefined;
+    env.references.delete(ref);
     return NAPI_OK;
   },
   napi_get_reference_value(env_id, ref, result) {
     let env = environments[env_id];
-    let reference = env.references[ref];
+    let reference = env.references.get(ref);
     return env.createValue(reference.value, result);
   },
   napi_reference_ref(env_id, ref, result) {
     let env = environments[env_id];
-    let reference = env.references[ref];
+    let reference = env.references.get(ref);
     reference.refcount++;
     return env.setPointer(result, reference.refcount);
   },
   napi_reference_unref(env_id, ref, result) {
     let env = environments[env_id];
-    let reference = env.references[ref];
+    let reference = env.references.get(ref);
     if (reference.refcount === 0) {
       return NAPI_GENERIC_FAILURE;
     }
@@ -468,22 +541,25 @@ export const napi = {
     return env.setPointer(result, reference.refcount);
   },
   napi_add_env_cleanup_hook() {
-    throw new Error('not implemented');
+    return NAPI_OK;
   },
   napi_remove_env_cleanup_hook() {
-    throw new Error('not implemented');
+    return NAPI_OK;
   },
   napi_add_async_cleanup_hook() {
-    throw new Error('not implemented');
+    return NAPI_OK;
   },
   napi_remove_async_cleanup_hook() {
-    throw new Error('not implemented');
+    return NAPI_OK;
   },
-  napi_set_instance_data() {
-    throw new Error('not implemented');
+  napi_set_instance_data(env_id, data, finalize_cb, finalize_hint) {
+    let env = environments[env_id];
+    env.instanceData = data;
+    return NAPI_OK;
   },
-  napi_get_instance_data() {
-    throw new Error('not implemented');
+  napi_get_instance_data(env_id, data) {
+    let env = environments[env_id];
+    return env.setPointer(data, env.instanceData);
   },
   napi_get_boolean(env_id, value, result) {
     let env = environments[env_id];
@@ -602,7 +678,7 @@ export const napi = {
     let obj = env.get(object);
     let res = false;
     try {
-      res = delete obj[name];
+      res = delete obj[index];
     } catch (err) {}
     if (result) {
       env.memory[result] = res ? 1 : 0;
@@ -640,8 +716,13 @@ export const napi = {
       argv += 4;
     }
 
-    let res = fn.apply(thisArg, args);
-    return env.createValue(res, result);
+    try {
+      let res = fn.apply(thisArg, args);
+      return env.createValue(res, result);
+    } catch (err) {
+      env.pendingException = err;
+      return NAPI_PENDING_EXCEPTION;
+    }
   },
   napi_new_instance(env_id, cons, argc, argv, result) {
     let env = environments[env_id];
@@ -653,8 +734,13 @@ export const napi = {
       argv += 4;
     }
 
-    let value = new Class(...args);
-    return env.createValue(value, result);
+    try {
+      let value = new Class(...args);
+      return env.createValue(value, result);
+    } catch (err) {
+      env.pendingException = err;
+      return NAPI_PENDING_EXCEPTION;
+    }
   },
   napi_get_cb_info(env_id, cbinfo, argc, argv, thisArg, data) {
     let env = environments[env_id];
@@ -798,57 +884,111 @@ export const napi = {
   },
   napi_create_buffer(env_id, length, data, result) {
     let env = environments[env_id];
-    return env.createValue(new BufferValue(env, data, length, null, null), result);
+    let ptr = env.instance.exports.wasm_malloc(length);
+    if (data) {
+      env.setPointer(data, ptr);
+    }
+
+    // Return a view into WASM memory.
+    let buf = typeof Buffer !== 'undefined'
+      ? Buffer.from(env.memory.buffer, ptr, length)
+      : env.memory.subarray(ptr, ptr + length);
+    return env.createValue(buf, result);
   },
   napi_create_buffer_copy(env_id, length, data, result_data, result) {
     let env = environments[env_id];
-    let buf = env.createBuffer(env.memory.subarray(data, data + length));
+    let ptr = env.instance.exports.wasm_malloc(length);
+    env.memory.set(env.memory.subarray(data, data + length), ptr);
     if (result_data) {
-      env.setPointer(result_data, buf.data);
+      env.setPointer(result_data, ptr);
     }
-    return env.createValue(buf, result);
+
+    // Return a view into WASM memory.
+    let res = typeof Buffer !== 'undefined'
+      ? Buffer.from(env.memory.buffer, ptr, length)
+      : buf;
+    return env.createValue(res, result);
   },
   napi_create_external_buffer(env_id, length, data, finalize_cb, finalize_hint, result) {
     let env = environments[env_id];
-    return env.createValue(new BufferValue(env, data, length, env.table.get(finalize_cb), finalize_hint), result);
+    let buf = typeof Buffer !== 'undefined'
+      ? Buffer.from(env.memory.buffer, data, length)
+      : env.memory.subarray(data, data + length);
+    if (finalize_cb) {
+      let cb = env.table.get(finalize_cb);
+      finalizationRegistry.register(buf, new FinalizeRecord(cb, finalize_hint, data));
+    }
+
+    return env.createValue(buf, result);
   },
   napi_get_buffer_info(env_id, value, data, length) {
     let env = environments[env_id];
     let buf = env.get(value);
-    env.setPointer(data, buf.data);
-    return env.setPointer(length, buf.length);
+    let len = env.getBufferInfo(buf, data);
+    return env.setPointer(length, len);
   },
   napi_create_arraybuffer(env_id, length, data, result) {
     let env = environments[env_id];
-    return env.createValue(new BufferValue(env, data, length, null, null), result);
+    let buf = new ArrayBuffer(length);
+    if (data) {
+      // This copies the ArrayBuffer into the WASM memory.
+      env.getBufferInfo(buf, ptr);
+    }
+    return env.createValue(buf, result);
   },
   napi_create_external_arraybuffer(env_id, data, length, finalize_cb, finalize_hint, result) {
-    let env = environments[env_id];
-    return env.createValue(new BufferValue(data, length, env.table.get(finalize_cb), finalize_hint), result);
+    // There is no way to actually create an external ArrayBuffer without copying.
+    // You can only create typed arrays as subarrays, not ArrayBuffer.
+    return NAPI_NO_EXTERNAL_BUFFERS_ALLOWED;
   },
   napi_get_arraybuffer_info(env_id, value, data, length) {
     let env = environments[env_id];
-    let buf = env.get(value);
-    env.setPointer(data, buf.data);
-    return env.setPointer(length, buf.length);
+    let len = env.getBufferInfo(env.get(value), data);
+    return env.setPointer(length, len);
   },
   napi_detach_arraybuffer(env_id, arraybuffer) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let buffer = env.get(arraybuffer);
+    if (typeof structuredClone === 'function') {
+      structuredClone(buffer, {transfer: [buffer]});
+    }
+    return NAPI_OK;
   },
   napi_is_detached_arraybuffer(env_id, arraybuffer, result) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let buffer = env.get(arraybuffer);
+    env.memory[result] = buffer.byteLength === 0 ? 1 : 0; // ??
+    return NAPI_OK;
   },
   napi_create_typedarray(env_id, type, length, arraybuffer, offset, result) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let Class = typedArrays[type];
+    let buffer = env.get(arraybuffer);
+    let buf = new Class(buffer, offset, length);
+    return env.createValue(buf, result);
   },
-  napi_create_dataview(env_id, length, arraybuffer, offset, result) {
-    throw new Error('not implemented');
+  napi_create_dataview(env_id, byte_length, arraybuffer, byte_offset, result) {
+    let env = environments[env_id];
+    let buffer = env.get(arraybuffer);
+    let view = new DataView(buffer, byte_offset, byte_length);
+    return env.createValue(view, result);
   },
   napi_get_typedarray_info(env_id, typedarray, type, length, data, arraybuffer, byte_offset) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let val = env.get(typedarray);
+    env.setPointer(type, typedArrays.indexOf(val.constructor));
+    env.setPointer(length, val.length);
+    env.getBufferInfo(val, data);
+    env.createValue(val.buffer, arraybuffer);
+    return env.setPointer(byte_offset, val.byteOffset);
   },
   napi_get_dataview_info(env_id, dataview, byte_length, data, arraybuffer, byte_offset) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let val = env.get(dataview);
+    env.setPointer(byte_length, val.byteLength);
+    env.getBufferInfo(val, data);
+    env.createValue(val.buffer, arraybuffer);
+    return env.setPointer(byte_offset, val.byteOffset);
   },
   napi_create_string_utf8(env_id, str, length, result) {
     let env = environments[env_id];
@@ -871,7 +1011,19 @@ export const napi = {
     return env.createValue(s, result);
   },
   napi_get_value_string_latin1(env_id, value, buf, bufsize, result) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let val = env.get(value);
+    if (buf == 0) {
+      return env.setPointer(result, val.length);
+    }
+    let mem = env.memory;
+    let len = Math.min(val.length, bufsize - 1);
+    for (let i = 0; i < len; i++) {
+      let code = val.charCodeAt(i);
+      mem[buf++] = code;
+    }
+    mem[buf] = 0; // null terminate
+    return env.setPointer(result, len);
   },
   napi_create_string_utf16(env_id, str, length, result) {
     let env = environments[env_id];
@@ -879,7 +1031,20 @@ export const napi = {
     return env.createValue(s, result);
   },
   napi_get_value_string_utf16(env_id, value, buf, bufsize, result) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let val = env.get(value);
+    if (buf == 0) {
+      return env.setPointer(result, val.length);
+    }
+    let mem = env.u16;
+    let ptr = buf >> 1;
+    let len = Math.min(val.length, bufsize - 1);
+    for (let i = 0; i < len; i++) {
+      let code = val.charCodeAt(i);
+      mem[ptr++] = code;
+    }
+    mem[ptr] = 0; // null terminate
+    return env.setPointer(result, len);
   },
   napi_create_date(env_id, time, result) {
     let env = environments[env_id];
@@ -972,10 +1137,16 @@ export const napi = {
     return NAPI_OK;
   },
   napi_is_typedarray(env_id, value, result) {
-
+    let env = environments[env_id];
+    let buf = env.get(value);
+    env.memory[result] = ArrayBuffer.isView(buf) && !(buf instanceof DataView) ? 1 : 0;
+    return NAPI_OK;
   },
   napi_is_dataview(env_id, value, result) {
-
+    let env = environments[env_id];
+    let val = env.get(value);
+    env.memory[result] = val instanceof DataView ? 1 : 0;
+    return NAPI_OK;
   },
   napi_strict_equals(env_id, lhs, rhs, result) {
     let env = environments[env_id];
