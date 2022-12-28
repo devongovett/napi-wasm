@@ -2,6 +2,12 @@ const NAPI_OK = 0;
 const NAPI_GENERIC_FAILURE = 9;
 const NAPI_HANDLE_SCOPE_MISMATCH = 13;
 
+// https://nodejs.org/api/n-api.html#napi_property_attributes
+const NAPI_WRITABLE = 1 << 0;
+const NAPI_ENUMERABLE = 1 << 1;
+const NAPI_CONFIGURABLE = 1 << 2;
+const NAPI_STATIC = 1 << 10;
+
 const environments = [];
 
 export class Environment {
@@ -156,6 +162,70 @@ export class Environment {
     let mem = this.memory;
     mem.set(data, ptr);
     return new BufferValue(this, ptr, data.byteLength, null, null);
+  }
+
+  createFunction(cb, data) {
+    let env = this;
+    let fn = env.table.get(cb);
+    let func = function (...args) {
+      let scope = env.pushScope();
+
+      try {
+        let values = env.scopes[scope];
+        let info = values.length;
+        values.push({
+          thisArg: this,
+          args,
+          data,
+          newTarget: new.target
+        });
+
+        let res = fn(env.id, info);
+        return env.get(res);
+      } finally {
+        env.popScope();
+        if (env.pendingException) {
+          let e = env.pendingException;
+          env.pendingException = null;
+          throw e;
+        }
+      }
+    };
+
+    return func;
+  }
+
+  readPropertyDescriptor(ptr) {
+    // https://nodejs.org/api/n-api.html#napi_property_descriptor
+    let buf = this.u32;
+    let utf8name = buf[ptr++];
+    let nameValue = buf[ptr++];
+    let method = buf[ptr++];
+    let getter = buf[ptr++];
+    let setter = buf[ptr++];
+    let val = buf[ptr++];
+    let attrs = buf[ptr++];
+    let data = buf[ptr++];
+
+    let name = utf8name ? this.getString(utf8name) : this.get(nameValue);
+    let writable = Boolean(attrs & NAPI_WRITABLE);
+    let enumerable = Boolean(attrs & NAPI_ENUMERABLE);
+    let configurable = Boolean(attrs & NAPI_CONFIGURABLE);
+    let isStatic = Boolean(attrs & NAPI_STATIC);
+    let get = getter ? this.createFunction(getter, data) : undefined;
+    let set = setter ? this.createFunction(setter, data) : undefined;
+    let value = method ? this.createFunction(method, data) : val ? this.get(val) : undefined;
+
+    return {
+      name,
+      writable,
+      enumerable,
+      configurable,
+      static: isStatic,
+      get,
+      set,
+      value
+    };
   }
 }
 
@@ -314,7 +384,15 @@ export const napi = {
     throw new Error('not implemented');
   },
   napi_define_properties(env_id, object, property_count, properties) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let obj = env.get(object);
+    let ptr = properties >> 2;
+    for (let i = 0; i < property_count; i++) {
+      let descriptor = env.readPropertyDescriptor(ptr);
+      Object.defineProperty(object, descriptor.name, descriptor);
+      ptr += 8;
+    }
+    return NAPI_OK;
   },
   napi_object_freeze(env_id, object) {
     let env = environments[env_id];
@@ -333,8 +411,27 @@ export const napi = {
     let obj = env.get(object);
     return env.createValue(Object.getPrototypeOf(obj), result);
   },
-  napi_define_class() {
-    throw new Error('not implemented');
+  napi_define_class(env_id, utf8name, length, constructor, data, property_count, properties, result) {
+    let env = environments[env_id];
+    let func = env.createFunction(constructor, data);
+
+    Object.defineProperty(func, 'name', {
+      value: env.getString(utf8name, length),
+      configurable: true
+    });
+
+    let ptr = properties >> 2;
+    for (let i = 0; i < property_count; i++) {
+      let descriptor = env.readPropertyDescriptor(ptr);
+      if (descriptor.static) {
+        Object.defineProperty(func, descriptor.name, descriptor);
+      } else {
+        Object.defineProperty(func.prototype, descriptor.name, descriptor);
+      }
+      ptr += 8;
+    }
+
+    return env.createValue(func, result);
   },
   napi_create_reference(env_id, value, refcount, result) {
     let env = environments[env_id];
@@ -523,31 +620,7 @@ export const napi = {
   },
   napi_create_function(env_id, utf8name, length, cb, data, result) {
     let env = environments[env_id];
-    let fn = env.table.get(cb);
-    let func = function (...args) {
-      let scope = env.pushScope();
-
-      try {
-        let values = env.scopes[scope];
-        let info = values.length;
-        values.push({
-          thisArg: this,
-          args,
-          data,
-          newTarget: new.target
-        });
-
-        let res = fn(env_id, info);
-        return env.get(res);
-      } finally {
-        env.popScope();
-        if (env.pendingException) {
-          let e = env.pendingException;
-          env.pendingException = null;
-          throw e;
-        }
-      }
-    };
+    let func = env.createFunction(cb, data);
 
     Object.defineProperty(func, 'name', {
       value: env.getString(utf8name, length),
