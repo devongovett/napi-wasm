@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "description": "An implementation of napi for wasm",
   "main": "index.mjs",
+  "exports": {
+    "import": "./index.mjs",
+    "require": "./index.js"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "prepublishOnly": "sed 's/^export //g' index.mjs > index.js && echo '\nexports.Environment = Environment;\nexports.napi = napi;' >> index.js"
   },
   "repository": {
     "type": "git",
