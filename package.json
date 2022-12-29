@@ -1,12 +1,16 @@
 {
   "name": "napi-wasm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "An implementation of napi for wasm",
   "main": "index.mjs",
   "exports": {
     "import": "./index.mjs",
     "require": "./index.js"
   },
+  "files": [
+    "index.js",
+    "index.mjs"
+  ],
   "scripts": {
     "prepublishOnly": "sed 's/^export //g' index.mjs > index.js && echo '\nexports.Environment = Environment;\nexports.napi = napi;' >> index.js"
   },
