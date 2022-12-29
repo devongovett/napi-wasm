@@ -905,8 +905,8 @@ export const napi = {
     }
 
     // Return a view into WASM memory.
-    let buf = typeof Buffer !== 'undefined'
-      ? Buffer.from(env.memory.buffer, ptr, length)
+    let buf = typeof globalThis.Buffer !== 'undefined'
+      ? globalThis.Buffer.from(env.memory.buffer, ptr, length)
       : env.memory.subarray(ptr, ptr + length);
     return env.createValue(buf, result);
   },
@@ -919,15 +919,15 @@ export const napi = {
     }
 
     // Return a view into WASM memory.
-    let res = typeof Buffer !== 'undefined'
-      ? Buffer.from(env.memory.buffer, ptr, length)
+    let res = typeof globalThis.Buffer !== 'undefined'
+      ? globalThis.Buffer.from(env.memory.buffer, ptr, length)
       : buf;
     return env.createValue(res, result);
   },
   napi_create_external_buffer(env_id, length, data, finalize_cb, finalize_hint, result) {
     let env = environments[env_id];
-    let buf = typeof Buffer !== 'undefined'
-      ? Buffer.from(env.memory.buffer, data, length)
+    let buf = typeof globalThis.Buffer !== 'undefined'
+      ? globalThis.Buffer.from(env.memory.buffer, data, length)
       : env.memory.subarray(data, data + length);
     if (finalize_cb) {
       let cb = env.table.get(finalize_cb);
@@ -1136,7 +1136,7 @@ export const napi = {
   napi_is_buffer(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
-    env.memory[result] = (typeof Buffer !== 'undefined' ? Buffer.isBuffer(val) : val instanceof Uint8Array) ? 1 : 0;
+    env.memory[result] = (typeof globalThis.Buffer !== 'undefined' ? globalThis.Buffer.isBuffer(val) : val instanceof Uint8Array) ? 1 : 0;
     return NAPI_OK;
   },
   napi_is_date(env_id, value, result) {
