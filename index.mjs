@@ -84,7 +84,10 @@ export class Environment {
 
     // Update any buffers with values which might have been modified in WASM copy.
     for (let [buffer, slice] of this.buffers) {
-      buffer.set(slice);
+      // Ignore if buffer or slice has been detached.
+      if (buffer.byteLength && slice.byteLength) {
+        buffer.set(slice);
+      }
     }
 
     this.buffers.clear();
