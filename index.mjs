@@ -794,7 +794,7 @@ export const napi = {
 
     if (thread_finalize_cb) {
       let cb = env.table.get(thread_finalize_cb);
-      finalizationRegistry.register(f, new FinalizeRecord(cb, 0, f.id));
+      finalizationRegistry.register(f, new FinalizeRecord(env_id, cb, 0, f.id));
     }
 
     env.setPointer(result, f.id);
@@ -931,7 +931,7 @@ export const napi = {
       : env.memory.subarray(data, data + length);
     if (finalize_cb) {
       let cb = env.table.get(finalize_cb);
-      finalizationRegistry.register(buf, new FinalizeRecord(cb, finalize_hint, data));
+      finalizationRegistry.register(buf, new FinalizeRecord(env_id, cb, finalize_hint, data));
     }
 
     return env.createValue(buf, result);
@@ -1174,7 +1174,7 @@ export const napi = {
     env.wrappedObjects.set(obj, native_object);
     if (finalize_cb) {
       let cb = env.table.get(finalize_cb);
-      finalizationRegistry.register(obj, new FinalizeRecord(cb, finalize_hint, native_object));
+      finalizationRegistry.register(obj, new FinalizeRecord(env_id, cb, finalize_hint, native_object));
     }
 
     if (result) {
@@ -1208,7 +1208,7 @@ export const napi = {
     let env = environments[env_id];
     let obj = env.get(js_object);
     let cb = env.table.get(finalize_cb);
-    finalizationRegistry.register(obj, new FinalizeRecord(cb, finalize_hint, native_object));
+    finalizationRegistry.register(obj, new FinalizeRecord(env_id, cb, finalize_hint, native_object));
     if (result) {
       return napi.napi_create_reference(env_id, js_object, 1, result);
     }
@@ -1256,7 +1256,7 @@ export const napi = {
     env.externalObjects.set(external, data);
     if (finalize_cb) {
       let cb = env.table.get(finalize_cb);
-      finalizationRegistry.register(external, new FinalizeRecord(cb, finalize_hint, data));
+      finalizationRegistry.register(external, new FinalizeRecord(env_id, cb, finalize_hint, data));
     }
     return env.createValue(external, result);
   },
