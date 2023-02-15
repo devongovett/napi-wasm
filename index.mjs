@@ -924,7 +924,7 @@ export const napi = {
     // Return a view into WASM memory.
     let res = typeof globalThis.Buffer !== 'undefined'
       ? globalThis.Buffer.from(env.memory.buffer, ptr, length)
-      : buf;
+      : env.memory.subarray(ptr, ptr + length);
     return env.createValue(res, result);
   },
   napi_create_external_buffer(env_id, length, data, finalize_cb, finalize_hint, result) {
@@ -950,7 +950,7 @@ export const napi = {
     let buf = new ArrayBuffer(length);
     if (data) {
       // This copies the ArrayBuffer into the WASM memory.
-      env.getBufferInfo(buf, ptr);
+      env.getBufferInfo(buf, data);
     }
     return env.createValue(buf, result);
   },
