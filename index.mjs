@@ -1,6 +1,7 @@
 const NAPI_OK = 0;
 const NAPI_GENERIC_FAILURE = 9;
 const NAPI_PENDING_EXCEPTION = 10;
+const NAPI_CANCELED = 11;
 const NAPI_HANDLE_SCOPE_MISMATCH = 13;
 const NAPI_NO_EXTERNAL_BUFFERS_ALLOWED = 22;
 
@@ -31,6 +32,7 @@ export class Environment {
   scopes = [];
   referenceId = 1;
   references = new Map();
+  deferred = [null];
   wrappedObjects = new WeakMap();
   externalObjects = new WeakMap();
   buffers = new Map();
@@ -51,7 +53,10 @@ export class Environment {
     values.push(this.exports);
 
     try {
-      this.instance.exports.napi_register_module_v1(this.id, exports);
+      if (this.instance.exports.napi_register_module_v1) {
+        this.instance.exports.napi_register_module_v1(this.id, exports);
+      }
+
       if (this.instance.exports.napi_register_wasm_v1) {
         this.instance.exports.napi_register_wasm_v1(this.id, exports);
       }
@@ -70,12 +75,12 @@ export class Environment {
   }
 
   getString(ptr, len = strlen(this.memory, ptr)) {
-    return decoder.decode(this.memory.subarray(ptr, ptr + len));
+    return decoder.decode(this.memory.subarray(ptr, Math.max(0, ptr + len)));
   }
 
   pushScope() {
     let id = this.scopes.length;
-    this.scopes.push([undefined, null, globalThis, true, false]);
+    this.scopes.push(id ? [...this.scopes[id - 1]] : [undefined, null, globalThis, true, false]);
     return id;
   }
 
@@ -101,14 +106,14 @@ export class Environment {
     this.scopes[this.scopes.length - 1][idx] = value;
   }
 
-  pushValue(value) {
-    let values = this.scopes[this.scopes.length - 1];
+  pushValue(value, scope = this.scopes.length - 1) {
+    let values = this.scopes[scope];
     let id = values.length;
     values.push(value);
     return id;
   }
 
-  createValue(value, result) {
+  createValue(value, result, scope) {
     if (typeof value === 'boolean') {
       this.setPointer(result, value ? 3 : 4);
       return NAPI_OK;
@@ -123,7 +128,7 @@ export class Environment {
       return NAPI_OK;
     }
 
-    let id = this.pushValue(value);
+    let id = this.pushValue(value, scope);
     this.setPointer(result, id);
     return NAPI_OK;
   }
@@ -334,6 +339,19 @@ class ThreadSafeFunction {
   }
 }
 
+const asyncWork = [null];
+
+class AsyncWork {
+  constructor(env, execute, complete, data) {
+    this.env = env;
+    this.execute = execute;
+    this.complete = complete;
+    this.data = data;
+    this.id = asyncWork.length;
+    asyncWork.push(this);
+  }
+}
+
 export const napi = {
   napi_open_handle_scope(env_id, result) {
     let env = environments[env_id];
@@ -349,13 +367,23 @@ export const napi = {
     return NAPI_OK;
   },
   napi_open_escapable_handle_scope(env_id, result) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    let id = env.pushScope();
+    return env.setPointer(result, id);
   },
   napi_close_escapable_handle_scope(env_id, scope) {
-    throw new Error('not implemented');
+    let env = environments[env_id];
+    if (scope !== env.scopes.length - 1) {
+      return NAPI_HANDLE_SCOPE_MISMATCH;
+    }
+    env.popScope();
+    return NAPI_OK;
   },
-  napi_escape_handle(env_id, scope, escapee, result) {
-    throw new Error('not implemented');
+  napi_escape_handle(env_id, scope_id, escapee, result) {
+    let env = environments[env_id];
+    let value = env.get(escapee);
+    // Create a value in the outer scope.
+    return env.createValue(value, result, scope_id - 1);
   },
   napi_create_object(env_id, result) {
     let env = environments[env_id];
@@ -835,6 +863,34 @@ export const napi = {
     f.env.setPointer(result, f.context);
     return NAPI_OK;
   },
+  napi_create_async_work(env_id, async_resource, async_resource_name, execute, complete, data, result) {
+    let env = environments[env_id];
+    let executeFn = execute ? env.table.get(execute) : undefined;
+    let completeFn = complete ? env.table.get(complete) : undefined;
+    let w = new AsyncWork(env, executeFn, completeFn, data);
+    env.setPointer(result, w.id);
+    return NAPI_OK;
+  },
+  napi_delete_async_work(env, work) {
+    asyncWork[work] = undefined;
+    return NAPI_OK;
+  },
+  napi_queue_async_work(env, work) {
+    queueMicrotask(() => {
+      let w = asyncWork[work];
+      if (w) {
+        w.execute(env, w.data);
+        w.complete(env, NAPI_OK, w.data);
+      }
+    });
+    return NAPI_OK;
+  },
+  napi_cancel_async_work() {
+    let w = asyncWork[work];
+    w.complete(env, NAPI_CANCELED, w.data);
+    asyncWork[work] = undefined;
+    return NAPI_OK;
+  },
   napi_throw(env_id, error) {
     let env = environments[env_id];
     env.pendingException = env.get(error);
@@ -1221,24 +1277,26 @@ export const napi = {
   napi_create_promise(env_id, deferred, promise) {
     let env = environments[env_id];
     let p = new Promise((resolve, reject) => {
-      env.createValue({ resolve, reject }, deferred);
+      let id = env.deferred.length;
+      env.deferred.push({resolve, reject});
+      env.setPointer(deferred, id);
     });
     return env.createValue(p, promise);
   },
   napi_resolve_deferred(env_id, deferred, resolution) {
     let env = environments[env_id];
-    let { resolve } = env.get(deferred);
+    let { resolve } = env.deferred[deferred];
     let value = env.get(resolution);
     resolve(value);
-    env.set(deferred, undefined);
+    env.deferred[deferred] = undefined;
     return NAPI_OK;
   },
   napi_reject_deferred(env_id, deferred, rejection) {
     let env = environments[env_id];
-    let { reject } = env.get(deferred);
+    let { reject } = env.deferred[deferred];
     let value = env.get(rejection);
     reject(value);
-    env.set(deferred, undefined);
+    env.deferred[deferred] = undefined;
     return NAPI_OK;
   },
   napi_is_promise(env_id, value, result) {
