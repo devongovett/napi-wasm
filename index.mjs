@@ -1,8 +1,13 @@
 const NAPI_OK = 0;
+const NAPI_INVALID_ARG = 1;
+const NAPI_STRING_EXPECTED = 3;
+const NAPI_NUMBER_EXPECTED = 6;
+const NAPI_BOOLEAN_EXPECTED = 7;
 const NAPI_GENERIC_FAILURE = 9;
 const NAPI_PENDING_EXCEPTION = 10;
 const NAPI_CANCELED = 11;
 const NAPI_HANDLE_SCOPE_MISMATCH = 13;
+const NAPI_BIGINT_EXPECTED = 17;
 const NAPI_NO_EXTERNAL_BUFFERS_ALLOWED = 22;
 
 // https://nodejs.org/api/n-api.html#napi_property_attributes
@@ -573,6 +578,9 @@ export const napi = {
   napi_get_value_bool(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "boolean") {
+      return NAPI_BOOLEAN_EXPECTED;
+    }
     env.memory[result] = val ? 1 : 0;
     return NAPI_OK;
   },
@@ -583,6 +591,9 @@ export const napi = {
   napi_get_value_int32(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "number") {
+      return NAPI_NUMBER_EXPECTED;
+    }
     env.i32[result >> 2] = val;
     return NAPI_OK;
   },
@@ -593,6 +604,9 @@ export const napi = {
   napi_get_value_uint32(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "number") {
+      return NAPI_NUMBER_EXPECTED;
+    }
     return env.setPointer(result, val);
   },
   napi_create_int64(env_id, value, result) {
@@ -602,6 +616,9 @@ export const napi = {
   napi_get_value_int64(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "number") {
+      return NAPI_NUMBER_EXPECTED;
+    }
     env.i64[result >> 3] = val;
     return NAPI_OK;
   },
@@ -612,6 +629,9 @@ export const napi = {
   napi_get_value_double(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "number") {
+      return NAPI_NUMBER_EXPECTED;
+    }
     env.f64[result >> 3] = val;
     return NAPI_OK;
   },
@@ -622,6 +642,9 @@ export const napi = {
   napi_get_value_bigint_int64(env_id, value, result, lossless) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "bigint") {
+      return NAPI_BIGINT_EXPECTED;
+    }
     env.i64[result >> 3] = val;
     if (lossless) {
       env.memory[lossless] = BigInt.asIntN(64, val) === val ? 1 : 0;
@@ -635,6 +658,9 @@ export const napi = {
   napi_get_value_bigint_uint64(env_id, value, result, lossless) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "bigint") {
+      return NAPI_BIGINT_EXPECTED;
+    }
     env.u64[result >> 3] = val;
     if (lossless) {
       env.memory[lossless] = BigInt.asUintN(64, val) === val ? 1 : 0;
@@ -660,6 +686,10 @@ export const napi = {
   napi_get_value_bigint_words(env_id, value, sign_bit, word_count, words) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "bigint") {
+      return NAPI_BIGINT_EXPECTED;
+    }
+
     let count = env.u32[word_count >> 2];
 
     if (sign_bit) {
@@ -1072,6 +1102,9 @@ export const napi = {
   napi_get_value_string_utf8(env_id, value, buf, bufsize, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "string") {
+      return NAPI_STRING_EXPECTED;
+    }
     if (buf == 0) {
       return env.setPointer(result, utf8Length(val));
     }
@@ -1087,6 +1120,9 @@ export const napi = {
   napi_get_value_string_latin1(env_id, value, buf, bufsize, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "string") {
+      return NAPI_STRING_EXPECTED;
+    }
     if (buf == 0) {
       return env.setPointer(result, val.length);
     }
@@ -1107,6 +1143,9 @@ export const napi = {
   napi_get_value_string_utf16(env_id, value, buf, bufsize, result) {
     let env = environments[env_id];
     let val = env.get(value);
+    if (typeof val !== "string") {
+      return NAPI_STRING_EXPECTED;
+    }
     if (buf == 0) {
       return env.setPointer(result, val.length);
     }
@@ -1325,6 +1364,9 @@ export const napi = {
     let env = environments[env_id];
     let external = env.get(value);
     let val = env.externalObjects.get(external);
+    if (!val) {
+      return NAPI_INVALID_ARG;
+    }
     return env.setPointer(result, val);
   },
   napi_adjust_external_memory() {
