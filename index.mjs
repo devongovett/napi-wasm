@@ -236,7 +236,7 @@ export class Environment {
       }
     };
 
-    finalizationRegistry.register(buf, new FinalizeRecord(env_id, finalize, 0, ptr));
+    finalizationRegistry.register(buf, new FinalizeRecord(this.id, finalize, 0, ptr));
     this.buffers.set(data, buf);
     return buf;
   }
