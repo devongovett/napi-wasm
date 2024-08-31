@@ -230,6 +230,13 @@ export class Environment {
     let mem = this.memory;
     mem.set(data, ptr);
     let buf = mem.subarray(ptr, ptr + data.byteLength);
+    let finalize = (_env, data) => {
+      if (this.instance.exports.napi_wasm_free) {
+        this.instance.exports.napi_wasm_free(data);
+      }
+    };
+
+    finalizationRegistry.register(buf, new FinalizeRecord(env_id, finalize, 0, ptr));
     this.buffers.set(data, buf);
     return buf;
   }
@@ -967,6 +974,14 @@ export const napi = {
     let buf = typeof globalThis.Buffer !== 'undefined'
       ? globalThis.Buffer.from(env.memory.buffer, ptr, length)
       : env.memory.subarray(ptr, ptr + length);
+
+    let finalize = (_env, data) => {
+      if (env.instance.exports.napi_wasm_free) {
+        env.instance.exports.napi_wasm_free(data);
+      }
+    };
+
+    finalizationRegistry.register(buf, new FinalizeRecord(env_id, finalize, 0, ptr));
     return env.createValue(buf, result);
   },
   napi_create_buffer_copy(env_id, length, data, result_data, result) {
@@ -981,6 +996,14 @@ export const napi = {
     let res = typeof globalThis.Buffer !== 'undefined'
       ? globalThis.Buffer.from(env.memory.buffer, ptr, length)
       : env.memory.subarray(ptr, ptr + length);
+
+    let finalize = (_env, data) => {
+      if (env.instance.exports.napi_wasm_free) {
+        env.instance.exports.napi_wasm_free(data);
+      }
+    };
+
+    finalizationRegistry.register(buf, new FinalizeRecord(env_id, finalize, 0, ptr));
     return env.createValue(res, result);
   },
   napi_create_external_buffer(env_id, length, data, finalize_cb, finalize_hint, result) {
@@ -1050,7 +1073,7 @@ export const napi = {
   napi_get_typedarray_info(env_id, typedarray, type, length, data, arraybuffer, byte_offset) {
     let env = environments[env_id];
     let val = env.get(typedarray);
-    env.setPointer(type, typedArrays.indexOf(val.constructor));
+    env.setPointer(type, typedArrays.findIndex(constructor => val instanceof constructor));
     env.setPointer(length, val.length);
     env.getBufferInfo(val, data);
     env.createValue(val.buffer, arraybuffer);
