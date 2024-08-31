@@ -1,6 +1,6 @@
 {
   "name": "napi-wasm",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "An implementation of napi for wasm",
   "main": "index.mjs",
   "exports": {
