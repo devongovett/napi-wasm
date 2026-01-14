@@ -1260,6 +1260,11 @@ export const napi = {
     env.memory[result] = (typeof globalThis.Buffer !== 'undefined' ? globalThis.Buffer.isBuffer(val) : val instanceof Uint8Array) ? 1 : 0;
     return NAPI_OK;
   },
+  napi_is_arraybuffer(env_id, value, result) {
+    let env = environments[env_id];
+    let val = env.get(value);
+    env.memory[result] = val instanceof ArrayBuffer ? 1 : 0;
+  },
   napi_is_date(env_id, value, result) {
     let env = environments[env_id];
     let val = env.get(value);
