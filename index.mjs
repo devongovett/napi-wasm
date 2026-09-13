@@ -488,6 +488,7 @@ function createNodeEnv(instance) {
         handles: new Map(),
         pending: new Set(),
         completions: new Set(),
+        workerTasks: new Map(),
         disposed: false
       };
       states.set(boundInstance, state);
@@ -508,6 +509,33 @@ function createNodeEnv(instance) {
     task.cancelled = true;
     if (task.handle !== undefined) {
       cancelNodeHandle(task.handle);
+    }
+  };
+
+  const scheduleWorker = (state, callback, arg, delay) => {
+    const previous = state.workerTasks.get(arg);
+    if (previous) {
+      cancelTask(previous);
+    }
+
+    const task = { cancelled: false, handle: undefined };
+    const run = () => {
+      if (state.workerTasks.get(arg) === task) {
+        state.workerTasks.delete(arg);
+      }
+      if (!task.cancelled && !state.disposed) {
+        callbackFor(state, callback, arg);
+      }
+    };
+    task.handle = setTimeout(run, Math.max(0, delay | 0));
+    state.workerTasks.set(arg, task);
+  };
+
+  const cancelWorker = (state, arg) => {
+    const task = state.workerTasks.get(arg);
+    if (task) {
+      cancelTask(task);
+      state.workerTasks.delete(arg);
     }
   };
 
@@ -556,11 +584,15 @@ function createNodeEnv(instance) {
     for (const task of state.pending) {
       cancelTask(task);
     }
+    for (const task of state.workerTasks.values()) {
+      cancelTask(task);
+    }
     for (const record of state.handles.values()) {
       stop(record);
     }
     state.pending.clear();
     state.completions.clear();
+    state.workerTasks.clear();
     state.handles.clear();
   };
 
@@ -659,6 +691,12 @@ function createNodeEnv(instance) {
      have no observable result for this adapter. */
   adapter.emscripten_asm_const_int = () => 0;
   adapter.emscripten_notify_memory_growth = () => NAPI_OK;
+  adapter.napi_wasm_schedule = (callback, arg, delay) => {
+    scheduleWorker(getState(), callback, arg, delay);
+  };
+  adapter.napi_wasm_cancel = arg => {
+    cancelWorker(getState(), arg);
+  };
 
   for (const name of unsupportedNodeImports) {
     adapter[name] = unsupportedNodeImport(name);

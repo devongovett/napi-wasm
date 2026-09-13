@@ -49,6 +49,8 @@ const requiredNodeEnv = [
   'crypto_box_open_afternm',
   'emscripten_asm_const_int',
   'emscripten_notify_memory_growth',
+  'napi_wasm_schedule',
+  'napi_wasm_cancel',
   '__syscall_rmdir',
   '__syscall_unlinkat',
   '__syscall_accept4',
