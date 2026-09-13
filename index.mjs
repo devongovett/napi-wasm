@@ -162,6 +162,11 @@ export class Environment {
     this.lastErrorSerial++;
   }
 
+  clearLastError() {
+    this.lastError = { status: NAPI_OK, message: '' };
+    this.lastErrorSerial++;
+  }
+
   getLastErrorInfo() {
     if (!this.lastErrorInfo) {
       const pointer = this.allocate(16);
@@ -1862,13 +1867,12 @@ export const napi = new Proxy(napiFunctions, {
       const errorSerial = env?.lastErrorSerial;
       try {
         const result = Reflect.apply(functionValue, target, args);
-        if (
-          typeof result === 'number' &&
-          result !== NAPI_OK &&
-          env &&
-          env.lastErrorSerial === errorSerial
-        ) {
-          env.setLastError(result, napiStatusMessage(result));
+        if (typeof result === 'number' && env) {
+          if (result === NAPI_OK) {
+            env.clearLastError();
+          } else if (env.lastErrorSerial === errorSerial) {
+            env.setLastError(result, napiStatusMessage(result));
+          }
         }
         return result;
       } catch (error) {

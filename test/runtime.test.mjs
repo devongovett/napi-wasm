@@ -95,9 +95,9 @@ test('loads the real N-API import fixture and implements required runtime calls'
     assert.equal(instance.exports.probe_last_error(environment.id, result), 0);
     const lastErrorInfo = environment.u32[result >> 2];
     assert.ok(lastErrorInfo > 0);
-    assert.equal(environment.u32[(lastErrorInfo + 12) >> 2], 9);
+    assert.equal(environment.u32[(lastErrorInfo + 12) >> 2], 0);
     const errorMessage = environment.getString(environment.u32[lastErrorInfo >> 2]);
-    assert.match(errorMessage, /uv_event_loop.*unsupported/i);
+    assert.equal(errorMessage, '');
 
     assert.equal(runtime.napi.napi_get_last_error_info(9999, result), 1);
     assert.equal(runtime.napi.napi_get_uv_event_loop(9999, result), 1);
@@ -107,6 +107,47 @@ test('loads the real N-API import fixture and implements required runtime calls'
     assert.equal(runtime.napi.napi_open_callback_scope(9999, 0, 1, result), 1);
     assert.equal(runtime.napi.napi_close_callback_scope(9999, 1), 1);
     assert.equal(runtime.napi.napi_is_arraybuffer(9999, 1, result), 1);
+  } finally {
+    environment.destroy();
+    nodeEnv.dispose();
+  }
+});
+
+test('clears the last N-API error after successful async and callback scopes', async () => {
+  const nodeEnv = runtime.createNodeEnv();
+  const { instance } = await WebAssembly.instantiate(requiredImportsWasm, {
+    napi: runtime.napi,
+    env: nodeEnv
+  });
+  nodeEnv.bind(instance);
+
+  const environment = new runtime.Environment(instance);
+  const result = 32;
+
+  try {
+    assert.equal(runtime.napi.napi_get_uv_event_loop(environment.id, result), 9);
+    assert.equal(environment.lastError.status, 9);
+    assert.match(environment.lastError.message, /uv_event_loop.*unsupported/i);
+
+    assert.equal(runtime.napi.napi_async_init(environment.id, 0, 0, result), 0);
+    const asyncContext = environment.u32[result >> 2];
+    assert.equal(instance.exports.probe_last_error(environment.id, result), 0);
+    let lastErrorInfo = environment.u32[result >> 2];
+    assert.equal(environment.u32[(lastErrorInfo + 12) >> 2], 0);
+    assert.equal(environment.getString(environment.u32[lastErrorInfo >> 2]), '');
+
+    assert.equal(
+      runtime.napi.napi_open_callback_scope(environment.id, 0, asyncContext, result),
+      0
+    );
+    const callbackScope = environment.u32[result >> 2];
+    assert.equal(instance.exports.probe_last_error(environment.id, result), 0);
+    lastErrorInfo = environment.u32[result >> 2];
+    assert.equal(environment.u32[(lastErrorInfo + 12) >> 2], 0);
+    assert.equal(environment.getString(environment.u32[lastErrorInfo >> 2]), '');
+
+    assert.equal(runtime.napi.napi_close_callback_scope(environment.id, callbackScope), 0);
+    assert.equal(runtime.napi.napi_async_destroy(environment.id, asyncContext), 0);
   } finally {
     environment.destroy();
     nodeEnv.dispose();
