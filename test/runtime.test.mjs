@@ -215,3 +215,31 @@ test('runs real WASM env callbacks and cancels work on dispose and rebind', asyn
     nodeEnv.dispose();
   }
 });
+
+test('refs and unrefs cooperative worker timers', () => {
+  const nodeEnv = runtime.createNodeEnv();
+  const instance = { exports: {} };
+  const handles = [];
+  const originalSetTimeout = globalThis.setTimeout;
+
+  globalThis.setTimeout = (...args) => {
+    const handle = originalSetTimeout(...args);
+    handles.push(handle);
+    return handle;
+  };
+
+  try {
+    nodeEnv.bind(instance);
+    nodeEnv.napi_wasm_schedule(0, 1, 1000);
+    assert.equal(handles.length, 1);
+    assert.equal(handles[0].hasRef(), true);
+
+    nodeEnv.unref();
+    assert.equal(handles[0].hasRef(), false);
+    nodeEnv.ref();
+    assert.equal(handles[0].hasRef(), true);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    nodeEnv.dispose();
+  }
+});
