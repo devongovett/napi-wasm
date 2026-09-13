@@ -12,7 +12,9 @@
     "index.mjs"
   ],
   "scripts": {
-    "prepublishOnly": "sed 's/^export //g' index.mjs > index.js && echo '\nexports.Environment = Environment;\nexports.napi = napi;' >> index.js"
+    "test": "node --test test/runtime.test.mjs",
+    "prepublishOnly": "sed 's/^export //g' index.mjs > index.js && echo '\nexports.Environment = Environment;\nexports.napi = napi;\nexports.createNodeEnv = createNodeEnv;' >> index.js",
+    "prepare": "npm run prepublishOnly"
   },
   "repository": {
     "type": "git",
