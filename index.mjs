@@ -437,6 +437,16 @@ function cancelNodeHandle(handle) {
   clearInterval(handle);
 }
 
+function setNodeHandleRef(handle, ref) {
+  if (handle && typeof handle.ref === 'function') {
+    if (ref) {
+      handle.ref();
+    } else {
+      handle.unref();
+    }
+  }
+}
+
 /**
  * Create the Node-compatible env import namespace.
  *
@@ -477,7 +487,8 @@ function createNodeEnv(instanceOrOptions, options) {
         pending: new Set(),
         completions: new Set(),
         workerTasks: new Map(),
-        disposed: false
+        disposed: false,
+        keepAlive: true
       };
       states.set(boundInstance, state);
     }
@@ -516,6 +527,7 @@ function createNodeEnv(instanceOrOptions, options) {
       }
     };
     task.handle = setTimeout(run, Math.max(0, delay | 0));
+    setNodeHandleRef(task.handle, state.keepAlive);
     state.workerTasks.set(arg, task);
   };
 
@@ -582,6 +594,13 @@ function createNodeEnv(instanceOrOptions, options) {
     state.completions.clear();
     state.workerTasks.clear();
     state.handles.clear();
+  };
+
+  const setKeepAlive = (state, keepAlive) => {
+    state.keepAlive = keepAlive;
+    for (const task of state.workerTasks.values()) {
+      setNodeHandleRef(task.handle, keepAlive);
+    }
   };
 
   const init = (type, handle, callback) => {
@@ -726,6 +745,22 @@ function createNodeEnv(instanceOrOptions, options) {
           }
         }
         boundInstance = undefined;
+      }
+    },
+    ref: {
+      enumerable: false,
+      value() {
+        if (boundInstance) {
+          setKeepAlive(getState(), true);
+        }
+      }
+    },
+    unref: {
+      enumerable: false,
+      value() {
+        if (boundInstance) {
+          setKeepAlive(getState(), false);
+        }
       }
     },
     env: {
