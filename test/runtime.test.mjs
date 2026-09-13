@@ -47,6 +47,7 @@ const requiredNodeEnv = [
   'crypto_secretbox_open',
   'crypto_box_beforenm',
   'crypto_box_open_afternm',
+  'emscripten_asm_const_int',
   'emscripten_notify_memory_growth',
   '__syscall_rmdir',
   '__syscall_unlinkat',

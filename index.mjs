@@ -653,6 +653,11 @@ function createNodeEnv(instance) {
   };
   adapter.uv_check_init = (_loop, handle) => init('check', handle, 0);
   adapter.uv_idle_init = (_loop, handle) => init('idle', handle, 0);
+  /* Standalone Emscripten modules can retain EM_ASM call sites even when no
+     JavaScript glue is emitted. The Node host has no Emscripten ASM table;
+     these call sites are used by the single-threaded WasmFS startup path and
+     have no observable result for this adapter. */
+  adapter.emscripten_asm_const_int = () => 0;
   adapter.emscripten_notify_memory_growth = () => NAPI_OK;
 
   for (const name of unsupportedNodeImports) {
