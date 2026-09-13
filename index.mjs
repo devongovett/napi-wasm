@@ -43,6 +43,12 @@ export class Environment {
   buffers = new Map();
   instanceData = 0;
   pendingException = null;
+  nextAsyncContextId = 1;
+  asyncContexts = new Map();
+  nextCallbackScopeId = 1;
+  callbackScopes = new Map();
+  lastErrorInfo = null;
+  uvLoopHandle = 0;
 
   constructor(instance) {
     this.id = environments.length;
@@ -141,6 +147,37 @@ export class Environment {
   setPointer(ptr, value) {
     this.u32[ptr >> 2] = value;
     return NAPI_OK;
+  }
+
+  allocate(size) {
+    if (typeof this.instance.exports.napi_wasm_malloc !== 'function') {
+      throw new Error('WASM instance does not export napi_wasm_malloc');
+    }
+    return this.instance.exports.napi_wasm_malloc(size);
+  }
+
+  getLastErrorInfo() {
+    if (!this.lastErrorInfo) {
+      const pointer = this.allocate(16);
+      const message = this.allocate(1);
+      this.memory[message] = 0;
+      this.lastErrorInfo = { pointer, message };
+    }
+
+    const { pointer, message } = this.lastErrorInfo;
+    this.u32[pointer >> 2] = message;
+    this.u32[(pointer + 4) >> 2] = 0;
+    this.u32[(pointer + 8) >> 2] = 0;
+    this.u32[(pointer + 12) >> 2] = this.pendingException ? NAPI_PENDING_EXCEPTION : NAPI_OK;
+    return pointer;
+  }
+
+  getUvEventLoop() {
+    if (!this.uvLoopHandle) {
+      this.uvLoopHandle = this.allocate(4);
+      this.u32[this.uvLoopHandle >> 2] = this.id + 1;
+    }
+    return this.uvLoopHandle;
   }
 
   _u32 = new Uint32Array();
@@ -363,6 +400,260 @@ class AsyncWork {
     asyncWork.push(this);
   }
 }
+
+const unsupportedNodeImports = [
+  'getnameinfo',
+  'pthread_setschedparam',
+  'sodium_init',
+  'getaddrinfo',
+  'crypto_box_easy_afternm',
+  'crypto_box_open_easy_afternm',
+  'crypto_box_keypair',
+  'sodium_allocarray',
+  'randombytes',
+  'crypto_secretbox',
+  'crypto_box',
+  'sodium_free',
+  'crypto_box_afternm',
+  'crypto_box_open',
+  'crypto_secretbox_open',
+  'crypto_box_beforenm',
+  'crypto_box_open_afternm',
+  '__syscall_rmdir',
+  '__syscall_unlinkat',
+  '__syscall_accept4',
+  '__syscall_bind',
+  '__syscall_connect',
+  '__syscall_getpeername',
+  '__syscall_getsockname',
+  '__syscall_getsockopt',
+  '__syscall_listen',
+  '__syscall_recvfrom',
+  '__syscall_sendto',
+  '__syscall_setsockopt',
+  '__syscall_socket'
+];
+
+function unsupportedNodeImport(name) {
+  return () => {
+    throw new Error(`Unsupported WebAssembly import env.${name}`);
+  };
+}
+
+function callbackFor(state, callback, ...args) {
+  if (!callback) {
+    return;
+  }
+
+  const table = state.instance.exports.__indirect_function_table;
+  const fn = table?.get(callback);
+  if (typeof fn !== 'function') {
+    throw new Error(`Invalid WebAssembly callback table index ${callback}`);
+  }
+  return fn(...args);
+}
+
+function later(callback) {
+  if (typeof setImmediate === 'function') {
+    return setImmediate(callback);
+  }
+  return queueMicrotask(callback);
+}
+
+function cancelLater(handle) {
+  if (typeof handle === 'object') {
+    return;
+  }
+  if (typeof clearImmediate === 'function') {
+    clearImmediate(handle);
+  }
+}
+
+function createNodeEnv(instance) {
+  let boundInstance = instance;
+  const states = new WeakMap();
+  const adapter = Object.create(null);
+
+  const getState = () => {
+    if (!boundInstance) {
+      throw new Error('Node WASM env adapter is not bound to a WebAssembly instance');
+    }
+
+    let state = states.get(boundInstance);
+    if (!state) {
+      state = { instance: boundInstance, handles: new Map() };
+      states.set(boundInstance, state);
+    }
+    return state;
+  };
+
+  const handleFor = (state, handle, type = 'handle') => {
+    let record = state.handles.get(handle);
+    if (!record) {
+      record = { handle, type, active: false, timers: new Set() };
+      state.handles.set(handle, record);
+    }
+    return record;
+  };
+
+  const stop = record => {
+    record.active = false;
+    for (const timer of record.timers) {
+      clearTimeout(timer);
+      clearInterval(timer);
+      cancelLater(timer);
+    }
+    record.timers.clear();
+  };
+
+  const schedule = (state, record, callback) => {
+    const timer = later(() => {
+      record.timers.delete(timer);
+      if (record.active !== false) {
+        callback();
+      }
+    });
+    record.timers.add(timer);
+    return timer;
+  };
+
+  const init = (type, handle, callback) => {
+    const record = handleFor(getState(), handle, type);
+    record.callback = callback;
+    record.active = false;
+    return NAPI_OK;
+  };
+
+  adapter.uv_async_init = (_loop, handle, callback) => init('async', handle, callback);
+  adapter.uv_unref = () => NAPI_OK;
+  adapter.uv_close = (handle, callback) => {
+    const state = getState();
+    const record = handleFor(state, handle);
+    stop(record);
+    record.active = true;
+    schedule(state, record, () => {
+      callbackFor(state, callback, handle);
+      state.handles.delete(handle);
+    });
+    return NAPI_OK;
+  };
+  adapter.uv_poll_init_socket = (_loop, handle, fd) => {
+    const record = handleFor(getState(), handle, 'poll');
+    record.fd = fd;
+    return NAPI_OK;
+  };
+  adapter.uv_timer_init = (_loop, handle) => init('timer', handle, 0);
+  adapter.uv_poll_stop = handle => {
+    const record = handleFor(getState(), handle);
+    stop(record);
+    return NAPI_OK;
+  };
+  adapter.uv_timer_stop = adapter.uv_poll_stop;
+  adapter.uv_poll_start = (handle, events, callback) => {
+    const state = getState();
+    const record = handleFor(state, handle, 'poll');
+    stop(record);
+    record.callback = callback;
+    record.events = events;
+    record.active = true;
+    schedule(state, record, () => callbackFor(state, callback, handle, 0, events));
+    return NAPI_OK;
+  };
+  adapter.uv_async_send = handle => {
+    const state = getState();
+    const record = handleFor(state, handle, 'async');
+    record.active = true;
+    schedule(state, record, () => callbackFor(state, record.callback, handle));
+    return NAPI_OK;
+  };
+  adapter.uv_queue_work = (_loop, request, workCallback, afterCallback) => {
+    const state = getState();
+    const record = handleFor(state, request, 'work');
+    record.active = true;
+    schedule(state, record, () => {
+      callbackFor(state, workCallback, request);
+      later(() => {
+        callbackFor(state, afterCallback, request, 0);
+        state.handles.delete(request);
+      });
+    });
+    return NAPI_OK;
+  };
+  adapter.uv_idle_start = (handle, callback) => {
+    const state = getState();
+    const record = handleFor(state, handle, 'idle');
+    record.callback = callback;
+    record.active = true;
+    schedule(state, record, () => callbackFor(state, callback, handle));
+    return NAPI_OK;
+  };
+  adapter.uv_check_start = adapter.uv_idle_start;
+  adapter.uv_timer_start = (handle, callback, timeout, repeat) => {
+    const state = getState();
+    const record = handleFor(state, handle, 'timer');
+    stop(record);
+    record.callback = callback;
+    record.active = true;
+    const invoke = () => callbackFor(state, callback, handle);
+    const timer = repeat
+      ? setInterval(invoke, Math.max(0, repeat))
+      : setTimeout(() => {
+        record.timers.delete(timer);
+        if (record.active) invoke();
+      }, Math.max(0, timeout));
+    record.timers.add(timer);
+    return NAPI_OK;
+  };
+  adapter.uv_check_init = (_loop, handle) => init('check', handle, 0);
+  adapter.uv_idle_init = (_loop, handle) => init('idle', handle, 0);
+  adapter.emscripten_notify_memory_growth = () => NAPI_OK;
+
+  for (const name of unsupportedNodeImports) {
+    adapter[name] = unsupportedNodeImport(name);
+  }
+
+  Object.defineProperties(adapter, {
+    bind: {
+      enumerable: false,
+      value(nextInstance) {
+        if (!nextInstance || !nextInstance.exports) {
+          throw new TypeError('createNodeEnv.bind expects a WebAssembly instance');
+        }
+        boundInstance = nextInstance;
+        getState();
+        return adapter;
+      }
+    },
+    attach: {
+      enumerable: false,
+      value(nextInstance) {
+        return adapter.bind(nextInstance);
+      }
+    },
+    dispose: {
+      enumerable: false,
+      value() {
+        if (boundInstance) {
+          const state = states.get(boundInstance);
+          if (state) {
+            for (const record of state.handles.values()) stop(record);
+            state.handles.clear();
+            states.delete(boundInstance);
+          }
+        }
+        boundInstance = undefined;
+      }
+    },
+    env: {
+      enumerable: false,
+      value: adapter
+    }
+  });
+
+  return adapter;
+}
+
+export { createNodeEnv };
 
 export const napi = {
   napi_open_handle_scope(env_id, result) {
@@ -900,6 +1191,68 @@ export const napi = {
     f.env.setPointer(result, f.context);
     return NAPI_OK;
   },
+  napi_get_last_error_info(env_id, result) {
+    let env = environments[env_id];
+    if (!env) {
+      return NAPI_INVALID_ARG;
+    }
+    return env.setPointer(result, env.getLastErrorInfo());
+  },
+  napi_get_uv_event_loop(env_id, result) {
+    let env = environments[env_id];
+    if (!env) {
+      return NAPI_INVALID_ARG;
+    }
+    return env.setPointer(result, env.getUvEventLoop());
+  },
+  napi_async_init(env_id, async_resource, async_resource_name, result) {
+    let env = environments[env_id];
+    if (!env) {
+      return NAPI_INVALID_ARG;
+    }
+    let id = env.nextAsyncContextId++;
+    env.asyncContexts.set(id, {
+      resource: async_resource,
+      resourceName: async_resource_name
+    });
+    return env.setPointer(result, id);
+  },
+  napi_open_callback_scope(env_id, resource_object, context, result) {
+    let env = environments[env_id];
+    if (!env || !env.asyncContexts.has(context)) {
+      return NAPI_INVALID_ARG;
+    }
+    let scope = env.pushScope();
+    let id = env.nextCallbackScopeId++;
+    env.callbackScopes.set(id, { context, resource: resource_object, scope });
+    return env.setPointer(result, id);
+  },
+  napi_close_callback_scope(env_id, scope_id) {
+    let env = environments[env_id];
+    let callbackScope = env?.callbackScopes.get(scope_id);
+    if (!env || !callbackScope) {
+      return NAPI_INVALID_ARG;
+    }
+    if (callbackScope.scope !== env.scopes.length - 1) {
+      return NAPI_HANDLE_SCOPE_MISMATCH;
+    }
+    env.popScope();
+    env.callbackScopes.delete(scope_id);
+    return NAPI_OK;
+  },
+  napi_async_destroy(env_id, context) {
+    let env = environments[env_id];
+    if (!env || !env.asyncContexts.has(context)) {
+      return NAPI_INVALID_ARG;
+    }
+    for (let callbackScope of env.callbackScopes.values()) {
+      if (callbackScope.context === context) {
+        return NAPI_HANDLE_SCOPE_MISMATCH;
+      }
+    }
+    env.asyncContexts.delete(context);
+    return NAPI_OK;
+  },
   napi_create_async_work(env_id, async_resource, async_resource_name, execute, complete, data, result) {
     let env = environments[env_id];
     let executeFn = execute ? env.table.get(execute) : undefined;
@@ -1033,7 +1386,7 @@ export const napi = {
       }
     };
 
-    finalizationRegistry.register(buf, new FinalizeRecord(env_id, finalize, 0, ptr));
+    finalizationRegistry.register(res, new FinalizeRecord(env_id, finalize, 0, ptr));
     return env.createValue(res, result);
   },
   napi_create_external_buffer(env_id, length, data, finalize_cb, finalize_hint, result) {
@@ -1252,6 +1605,12 @@ export const napi = {
     let env = environments[env_id];
     let val = env.get(value);
     env.memory[result] = Array.isArray(val) ? 1 : 0;
+    return NAPI_OK;
+  },
+  napi_is_arraybuffer(env_id, value, result) {
+    let env = environments[env_id];
+    let val = env.get(value);
+    env.memory[result] = val instanceof ArrayBuffer ? 1 : 0;
     return NAPI_OK;
   },
   napi_is_buffer(env_id, value, result) {
