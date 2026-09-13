@@ -68,39 +68,49 @@ test('loads the real N-API import fixture and implements required runtime calls'
     assert.equal(typeof runtime.napi[name], 'function', `${name} must be callable`);
   }
 
+  const nodeEnv = runtime.createNodeEnv();
   const { instance } = await WebAssembly.instantiate(requiredImportsWasm, {
     napi: runtime.napi,
-    env: {}
+    env: nodeEnv
   });
+  nodeEnv.bind(instance);
 
   const environment = new runtime.Environment(instance);
   const result = 32;
-  environment.pushScope();
-  const arrayBuffer = environment.pushValue(new ArrayBuffer(8));
-  const object = environment.pushValue({});
 
-  assert.equal(instance.exports.probe(environment.id, arrayBuffer, result), 0);
-  assert.equal(environment.memory[result], 1);
-  assert.equal(instance.exports.probe(environment.id, object, result), 0);
-  assert.equal(environment.memory[result], 0);
+  try {
+    environment.pushScope();
+    const arrayBuffer = environment.pushValue(new ArrayBuffer(8));
+    const object = environment.pushValue({});
 
-  assert.equal(runtime.napi.napi_get_last_error_info(environment.id, result), 0);
-  const lastErrorInfo = environment.u32[result >> 2];
-  assert.ok(lastErrorInfo > 0);
-  assert.equal(runtime.napi.napi_get_last_error_info(environment.id, result), 0);
-  assert.equal(environment.u32[result >> 2], lastErrorInfo);
+    assert.equal(instance.exports.probe(environment.id, arrayBuffer, result), 0);
+    assert.equal(environment.memory[result], 1);
+    assert.equal(instance.exports.probe(environment.id, object, result), 0);
+    assert.equal(environment.memory[result], 0);
 
-  assert.equal(runtime.napi.napi_get_uv_event_loop(environment.id, result), 0);
-  assert.ok(environment.u32[result >> 2] > 0);
+    assert.equal(instance.exports.exercise_napi(environment.id, arrayBuffer, result), 0);
+    assert.equal(environment.memory[result], 1);
+    assert.equal(environment.u32[36 >> 2], 0, 'uv loop output must be null');
 
-  assert.equal(runtime.napi.napi_async_init(environment.id, 0, 0, result), 0);
-  const asyncContext = environment.u32[result >> 2];
-  assert.ok(asyncContext > 0);
-  assert.equal(runtime.napi.napi_open_callback_scope(environment.id, 0, asyncContext, result), 0);
-  const callbackScope = environment.u32[result >> 2];
-  assert.ok(callbackScope > 0);
-  assert.equal(runtime.napi.napi_close_callback_scope(environment.id, callbackScope), 0);
-  assert.equal(runtime.napi.napi_async_destroy(environment.id, asyncContext), 0);
+    assert.equal(instance.exports.probe_last_error(environment.id, result), 0);
+    const lastErrorInfo = environment.u32[result >> 2];
+    assert.ok(lastErrorInfo > 0);
+    assert.equal(environment.u32[(lastErrorInfo + 12) >> 2], 9);
+    const errorMessage = environment.getString(environment.u32[lastErrorInfo >> 2]);
+    assert.match(errorMessage, /uv_event_loop.*unsupported/i);
+
+    assert.equal(runtime.napi.napi_get_last_error_info(9999, result), 1);
+    assert.equal(runtime.napi.napi_get_uv_event_loop(9999, result), 1);
+    assert.equal(runtime.napi.napi_async_destroy(9999, 1), 1);
+    assert.equal(runtime.napi.napi_async_destroy(environment.id, 1), 1);
+    assert.equal(runtime.napi.napi_async_init(9999, 0, 0, result), 1);
+    assert.equal(runtime.napi.napi_open_callback_scope(9999, 0, 1, result), 1);
+    assert.equal(runtime.napi.napi_close_callback_scope(9999, 1), 1);
+    assert.equal(runtime.napi.napi_is_arraybuffer(9999, 1, result), 1);
+  } finally {
+    environment.destroy();
+    nodeEnv.dispose();
+  }
 });
 
 test('exposes the audited Node env imports and reports unsupported calls explicitly', () => {
@@ -110,28 +120,34 @@ test('exposes the audited Node env imports and reports unsupported calls explici
     assert.equal(typeof nodeEnv[name], 'function', `env.${name} must be callable`);
   }
 
+  assert.equal(typeof nodeEnv.unknown_import, 'function');
+  assert.throws(() => nodeEnv.unknown_import(), /Unsupported WebAssembly import env\.unknown_import/);
   assert.throws(() => nodeEnv.sodium_init(), /Unsupported WebAssembly import env\.sodium_init/);
   assert.throws(() => nodeEnv.__syscall_socket(), /Unsupported WebAssembly import env\.__syscall_socket/);
 });
 
-test('schedules an async callback through the bound indirect function table', async () => {
-  const calls = [];
-  const instance = {
-    exports: {
-      __indirect_function_table: {
-        get(index) {
-          assert.equal(index, 3);
-          return (...args) => calls.push(args);
-        }
-      }
-    }
-  };
-  const nodeEnv = runtime.createNodeEnv(instance);
+test('runs real WASM env callbacks and cancels work on dispose and rebind', async () => {
+  const nodeEnv = runtime.createNodeEnv();
+  const { instance } = await WebAssembly.instantiate(requiredImportsWasm, {
+    napi: runtime.napi,
+    env: nodeEnv
+  });
+  nodeEnv.bind(instance);
+  const environment = new runtime.Environment(instance);
 
-  assert.equal(nodeEnv.uv_async_init(0, 64, 3), 0);
-  assert.equal(nodeEnv.uv_async_send(64), 0);
-  await new Promise(resolve => setImmediate(resolve));
+  try {
+    const memory = new Uint32Array(instance.exports.memory.buffer);
+    assert.equal(instance.exports.exercise_env(96), 0);
+    nodeEnv.dispose();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual([...memory.slice(16, 19)], [0, 0, 0]);
 
-  assert.deepEqual(calls, [[64]]);
-  nodeEnv.dispose();
+    nodeEnv.bind(instance);
+    assert.equal(instance.exports.exercise_env(96), 0);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual([...memory.slice(16, 19)], [1, 1, 1]);
+  } finally {
+    environment.destroy();
+    nodeEnv.dispose();
+  }
 });

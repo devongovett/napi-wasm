@@ -48,7 +48,8 @@ export class Environment {
   nextCallbackScopeId = 1;
   callbackScopes = new Map();
   lastErrorInfo = null;
-  uvLoopHandle = 0;
+  lastError = { status: NAPI_OK, message: '' };
+  lastErrorSerial = 0;
 
   constructor(instance) {
     this.id = environments.length;
@@ -156,28 +157,33 @@ export class Environment {
     return this.instance.exports.napi_wasm_malloc(size);
   }
 
+  setLastError(status, message) {
+    this.lastError = { status, message };
+    this.lastErrorSerial++;
+  }
+
   getLastErrorInfo() {
     if (!this.lastErrorInfo) {
       const pointer = this.allocate(16);
-      const message = this.allocate(1);
-      this.memory[message] = 0;
-      this.lastErrorInfo = { pointer, message };
+      this.lastErrorInfo = { pointer, message: 0, capacity: 0 };
     }
 
-    const { pointer, message } = this.lastErrorInfo;
+    const { pointer } = this.lastErrorInfo;
+    const encodedMessage = encoder.encode(this.lastError.message);
+    const requiredCapacity = encodedMessage.byteLength + 1;
+    if (requiredCapacity > this.lastErrorInfo.capacity) {
+      this.lastErrorInfo.message = this.allocate(requiredCapacity);
+      this.lastErrorInfo.capacity = requiredCapacity;
+    }
+
+    const { message } = this.lastErrorInfo;
+    this.memory.set(encodedMessage, message);
+    this.memory[message + encodedMessage.byteLength] = 0;
     this.u32[pointer >> 2] = message;
     this.u32[(pointer + 4) >> 2] = 0;
     this.u32[(pointer + 8) >> 2] = 0;
-    this.u32[(pointer + 12) >> 2] = this.pendingException ? NAPI_PENDING_EXCEPTION : NAPI_OK;
+    this.u32[(pointer + 12) >> 2] = this.lastError.status;
     return pointer;
-  }
-
-  getUvEventLoop() {
-    if (!this.uvLoopHandle) {
-      this.uvLoopHandle = this.allocate(4);
-      this.u32[this.uvLoopHandle >> 2] = this.id + 1;
-    }
-    return this.uvLoopHandle;
   }
 
   _u32 = new Uint32Array();
@@ -441,7 +447,7 @@ function unsupportedNodeImport(name) {
 }
 
 function callbackFor(state, callback, ...args) {
-  if (!callback) {
+  if (callback === undefined || callback === null) {
     return;
   }
 
@@ -453,26 +459,17 @@ function callbackFor(state, callback, ...args) {
   return fn(...args);
 }
 
-function later(callback) {
-  if (typeof setImmediate === 'function') {
-    return setImmediate(callback);
-  }
-  return queueMicrotask(callback);
-}
-
-function cancelLater(handle) {
-  if (typeof handle === 'object') {
-    return;
-  }
-  if (typeof clearImmediate === 'function') {
-    clearImmediate(handle);
-  }
+function cancelNodeHandle(handle) {
+  clearImmediate(handle);
+  clearTimeout(handle);
+  clearInterval(handle);
 }
 
 function createNodeEnv(instance) {
   let boundInstance = instance;
   const states = new WeakMap();
   const adapter = Object.create(null);
+  let namespace;
 
   const getState = () => {
     if (!boundInstance) {
@@ -481,7 +478,13 @@ function createNodeEnv(instance) {
 
     let state = states.get(boundInstance);
     if (!state) {
-      state = { instance: boundInstance, handles: new Map() };
+      state = {
+        instance: boundInstance,
+        handles: new Map(),
+        pending: new Set(),
+        completions: new Set(),
+        disposed: false
+      };
       states.set(boundInstance, state);
     }
     return state;
@@ -490,31 +493,70 @@ function createNodeEnv(instance) {
   const handleFor = (state, handle, type = 'handle') => {
     let record = state.handles.get(handle);
     if (!record) {
-      record = { handle, type, active: false, timers: new Set() };
+      record = { handle, type, active: false, scheduled: new Set(), timers: new Set() };
       state.handles.set(handle, record);
     }
     return record;
   };
 
+  const cancelTask = task => {
+    task.cancelled = true;
+    if (task.handle !== undefined) {
+      cancelNodeHandle(task.handle);
+    }
+  };
+
   const stop = record => {
     record.active = false;
-    for (const timer of record.timers) {
-      clearTimeout(timer);
-      clearInterval(timer);
-      cancelLater(timer);
+    for (const task of record.scheduled) {
+      cancelTask(task);
     }
+    for (const timer of record.timers) {
+      cancelNodeHandle(timer);
+    }
+    record.scheduled.clear();
     record.timers.clear();
   };
 
-  const schedule = (state, record, callback) => {
-    const timer = later(() => {
-      record.timers.delete(timer);
-      if (record.active !== false) {
+  const schedule = (state, record, callback, completion = false) => {
+    const task = { cancelled: false, handle: undefined };
+    const run = () => {
+      state.pending.delete(task);
+      if (completion) {
+        state.completions.delete(task);
+      }
+      if (record) {
+        record.scheduled.delete(task);
+      }
+      if (!task.cancelled && !state.disposed) {
         callback();
       }
-    });
-    record.timers.add(timer);
-    return timer;
+    };
+    task.handle = typeof setImmediate === 'function' ? setImmediate(run) : undefined;
+    if (task.handle === undefined) {
+      queueMicrotask(run);
+    }
+    state.pending.add(task);
+    if (completion) {
+      state.completions.add(task);
+    }
+    if (record) {
+      record.scheduled.add(task);
+    }
+    return task;
+  };
+
+  const disposeState = state => {
+    state.disposed = true;
+    for (const task of state.pending) {
+      cancelTask(task);
+    }
+    for (const record of state.handles.values()) {
+      stop(record);
+    }
+    state.pending.clear();
+    state.completions.clear();
+    state.handles.clear();
   };
 
   const init = (type, handle, callback) => {
@@ -572,10 +614,10 @@ function createNodeEnv(instance) {
     record.active = true;
     schedule(state, record, () => {
       callbackFor(state, workCallback, request);
-      later(() => {
+      schedule(state, record, () => {
         callbackFor(state, afterCallback, request, 0);
         state.handles.delete(request);
-      });
+      }, true);
     });
     return NAPI_OK;
   };
@@ -619,9 +661,16 @@ function createNodeEnv(instance) {
         if (!nextInstance || !nextInstance.exports) {
           throw new TypeError('createNodeEnv.bind expects a WebAssembly instance');
         }
+        if (boundInstance) {
+          const state = states.get(boundInstance);
+          if (state) {
+            disposeState(state);
+            states.delete(boundInstance);
+          }
+        }
         boundInstance = nextInstance;
         getState();
-        return adapter;
+        return namespace;
       }
     },
     attach: {
@@ -636,8 +685,7 @@ function createNodeEnv(instance) {
         if (boundInstance) {
           const state = states.get(boundInstance);
           if (state) {
-            for (const record of state.handles.values()) stop(record);
-            state.handles.clear();
+            disposeState(state);
             states.delete(boundInstance);
           }
         }
@@ -646,16 +694,27 @@ function createNodeEnv(instance) {
     },
     env: {
       enumerable: false,
-      value: adapter
+      get() {
+        return namespace;
+      }
     }
   });
 
-  return adapter;
+  namespace = new Proxy(adapter, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && !(property in target)) {
+        return unsupportedNodeImport(property);
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+
+  return namespace;
 }
 
 export { createNodeEnv };
 
-export const napi = {
+const napiFunctions = {
   napi_open_handle_scope(env_id, result) {
     let env = environments[env_id];
     let id = env.pushScope();
@@ -1203,7 +1262,14 @@ export const napi = {
     if (!env) {
       return NAPI_INVALID_ARG;
     }
-    return env.setPointer(result, env.getUvEventLoop());
+    if (result) {
+      env.setPointer(result, 0);
+    }
+    env.setLastError(
+      NAPI_GENERIC_FAILURE,
+      'napi_get_uv_event_loop is unsupported for WebAssembly; use the host scheduler adapter'
+    );
+    return NAPI_GENERIC_FAILURE;
   },
   napi_async_init(env_id, async_resource, async_resource_name, result) {
     let env = environments[env_id];
@@ -1609,6 +1675,9 @@ export const napi = {
   },
   napi_is_arraybuffer(env_id, value, result) {
     let env = environments[env_id];
+    if (!env) {
+      return NAPI_INVALID_ARG;
+    }
     let val = env.get(value);
     env.memory[result] = val instanceof ArrayBuffer ? 1 : 0;
     return NAPI_OK;
@@ -1755,6 +1824,65 @@ export const napi = {
     return NAPI_OK;
   }
 };
+
+function napiStatusMessage(status) {
+  switch (status) {
+    case NAPI_INVALID_ARG:
+      return 'invalid argument';
+    case NAPI_STRING_EXPECTED:
+      return 'string expected';
+    case NAPI_NUMBER_EXPECTED:
+      return 'number expected';
+    case NAPI_BOOLEAN_EXPECTED:
+      return 'boolean expected';
+    case NAPI_PENDING_EXCEPTION:
+      return 'pending exception';
+    case NAPI_CANCELED:
+      return 'operation canceled';
+    case NAPI_HANDLE_SCOPE_MISMATCH:
+      return 'handle scope mismatch';
+    case NAPI_BIGINT_EXPECTED:
+      return 'bigint expected';
+    case NAPI_NO_EXTERNAL_BUFFERS_ALLOWED:
+      return 'external buffers are not supported';
+    default:
+      return `N-API call failed with status ${status}`;
+  }
+}
+
+export const napi = new Proxy(napiFunctions, {
+  get(target, property, receiver) {
+    const functionValue = Reflect.get(target, property, receiver);
+    if (typeof functionValue !== 'function') {
+      return functionValue;
+    }
+
+    return (...args) => {
+      const env = environments[args[0]];
+      const errorSerial = env?.lastErrorSerial;
+      try {
+        const result = Reflect.apply(functionValue, target, args);
+        if (
+          typeof result === 'number' &&
+          result !== NAPI_OK &&
+          env &&
+          env.lastErrorSerial === errorSerial
+        ) {
+          env.setLastError(result, napiStatusMessage(result));
+        }
+        return result;
+      } catch (error) {
+        if (env && env.lastErrorSerial === errorSerial) {
+          env.setLastError(
+            NAPI_PENDING_EXCEPTION,
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+        throw error;
+      }
+    };
+  }
+});
 
 function strlen(buf, ptr) {
   let len = 0;
