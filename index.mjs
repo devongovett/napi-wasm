@@ -412,40 +412,7 @@ class AsyncWork {
   }
 }
 
-const unsupportedNodeImports = [
-  'getnameinfo',
-  'pthread_setschedparam',
-  'sodium_init',
-  'getaddrinfo',
-  'crypto_box_easy_afternm',
-  'crypto_box_open_easy_afternm',
-  'crypto_box_keypair',
-  'sodium_allocarray',
-  'randombytes',
-  'crypto_secretbox',
-  'crypto_box',
-  'sodium_free',
-  'crypto_box_afternm',
-  'crypto_box_open',
-  'crypto_secretbox_open',
-  'crypto_box_beforenm',
-  'crypto_box_open_afternm',
-  '__syscall_rmdir',
-  '__syscall_unlinkat',
-  '__syscall_accept4',
-  '__syscall_bind',
-  '__syscall_connect',
-  '__syscall_getpeername',
-  '__syscall_getsockname',
-  '__syscall_getsockopt',
-  '__syscall_listen',
-  '__syscall_recvfrom',
-  '__syscall_sendto',
-  '__syscall_setsockopt',
-  '__syscall_socket'
-];
-
-function unsupportedNodeImport(name) {
+function unsupportedImport(name) {
   return () => {
     throw new Error(`Unsupported WebAssembly import env.${name}`);
   };
@@ -470,8 +437,29 @@ function cancelNodeHandle(handle) {
   clearInterval(handle);
 }
 
-function createNodeEnv(instance) {
-  let boundInstance = instance;
+/**
+ * Create the Node-compatible env import namespace.
+ *
+ * The first argument may be a WebAssembly instance or an options object. The
+ * two-argument form, createNodeEnv(instance, options), is also supported.
+ * `unsupportedImports` makes add-on-specific unresolved imports explicit while
+ * retaining the generic proxy fallback for any other unknown env import.
+ */
+function createNodeEnv(instanceOrOptions, options) {
+  let boundInstance = instanceOrOptions;
+  let config = options;
+  if (options === undefined && instanceOrOptions && !instanceOrOptions.exports) {
+    boundInstance = undefined;
+    config = instanceOrOptions;
+  }
+
+  const unsupportedImports = new Set(config?.unsupportedImports ?? []);
+  for (const name of unsupportedImports) {
+    if (typeof name !== 'string') {
+      throw new TypeError('createNodeEnv unsupportedImports must contain strings');
+    }
+  }
+
   const states = new WeakMap();
   const adapter = Object.create(null);
   let namespace;
@@ -698,8 +686,8 @@ function createNodeEnv(instance) {
     cancelWorker(getState(), arg);
   };
 
-  for (const name of unsupportedNodeImports) {
-    adapter[name] = unsupportedNodeImport(name);
+  for (const name of unsupportedImports) {
+    adapter[name] = unsupportedImport(name);
   }
 
   Object.defineProperties(adapter, {
@@ -751,7 +739,7 @@ function createNodeEnv(instance) {
   namespace = new Proxy(adapter, {
     get(target, property, receiver) {
       if (typeof property === 'string' && !(property in target)) {
-        return unsupportedNodeImport(property);
+        return unsupportedImport(property);
       }
       return Reflect.get(target, property, receiver);
     }

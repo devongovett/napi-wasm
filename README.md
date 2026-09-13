@@ -98,3 +98,27 @@ exports.transform({
 ```
 
 When you are done with an `Environment`, call the `destroy()` function to clean up memory.
+
+### Unsupported imports
+
+The Node environment adapter accepts an optional `unsupportedImports` list for
+add-on-specific imports that are intentionally unavailable in the host. Those
+names are exposed as functions that throw if called. Unknown `env` imports use
+the same behavior automatically.
+
+```js
+import { createNodeEnv } from 'napi-wasm';
+
+const nodeEnv = createNodeEnv({
+  unsupportedImports: ['addon_specific_import']
+});
+```
+
+The adapter also accepts `createNodeEnv(instance, options)` when an instance is
+available at construction time.
+
+### Testing
+
+The test suite compiles `test/fixtures/required-imports.wat` at test time. A
+WAT compiler must be installed: either `wat2wasm` from WABT or `wasm-as` from
+Binaryen. Set `WAT_COMPILER` to use a compiler at a custom path.

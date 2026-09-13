@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import test from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import * as runtime from '../index.mjs';
-import { requiredImportsWasm } from './fixtures/required-imports.mjs';
+
+const execFileAsync = promisify(execFile);
 
 const requiredNapi = [
   'napi_get_last_error_info',
@@ -30,41 +37,49 @@ const requiredNodeEnv = [
   'uv_timer_start',
   'uv_check_init',
   'uv_idle_init',
-  'getnameinfo',
-  'pthread_setschedparam',
-  'sodium_init',
-  'getaddrinfo',
-  'crypto_box_easy_afternm',
-  'crypto_box_open_easy_afternm',
-  'crypto_box_keypair',
-  'sodium_allocarray',
-  'randombytes',
-  'crypto_secretbox',
-  'crypto_box',
-  'sodium_free',
-  'crypto_box_afternm',
-  'crypto_box_open',
-  'crypto_secretbox_open',
-  'crypto_box_beforenm',
-  'crypto_box_open_afternm',
   'emscripten_asm_const_int',
   'emscripten_notify_memory_growth',
   'napi_wasm_schedule',
-  'napi_wasm_cancel',
-  '__syscall_rmdir',
-  '__syscall_unlinkat',
-  '__syscall_accept4',
-  '__syscall_bind',
-  '__syscall_connect',
-  '__syscall_getpeername',
-  '__syscall_getsockname',
-  '__syscall_getsockopt',
-  '__syscall_listen',
-  '__syscall_recvfrom',
-  '__syscall_sendto',
-  '__syscall_setsockopt',
-  '__syscall_socket'
+  'napi_wasm_cancel'
 ];
+
+async function findWatCompiler() {
+  const candidates = process.env.WAT_COMPILER
+    ? [process.env.WAT_COMPILER]
+    : ['wat2wasm', 'wasm-as'];
+
+  for (const candidate of candidates) {
+    try {
+      await execFileAsync(candidate, ['--version']);
+      return candidate;
+    } catch {
+      // Try the next compiler so local WABT and Binaryen installations both work.
+    }
+  }
+
+  throw new Error(
+    'napi-wasm tests require a WAT compiler. Install wat2wasm (WABT), install wasm-as (Binaryen), or set WAT_COMPILER.'
+  );
+}
+
+async function loadRequiredImportsWasm() {
+  const compiler = await findWatCompiler();
+  const fixturePath = fileURLToPath(new URL('./fixtures/required-imports.wat', import.meta.url));
+  const directory = await mkdtemp(join(tmpdir(), 'napi-wasm-test-'));
+  const outputPath = join(directory, 'required-imports.wasm');
+
+  try {
+    await execFileAsync(compiler, [fixturePath, '-o', outputPath]);
+    return new Uint8Array(await readFile(outputPath));
+  } catch (error) {
+    const detail = error.stderr?.trim() || error.message;
+    throw new Error(`Failed to compile ${fixturePath}: ${detail}`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+const requiredImportsWasm = await loadRequiredImportsWasm();
 
 test('loads the real N-API import fixture and implements required runtime calls', async () => {
   for (const name of requiredNapi) {
@@ -157,8 +172,10 @@ test('clears the last N-API error after successful async and callback scopes', a
   }
 });
 
-test('exposes the audited Node env imports and reports unsupported calls explicitly', () => {
-  const nodeEnv = runtime.createNodeEnv();
+test('exposes the implemented Node env imports and reports unsupported calls explicitly', () => {
+  const nodeEnv = runtime.createNodeEnv({
+    unsupportedImports: ['addon_specific_import']
+  });
 
   for (const name of requiredNodeEnv) {
     assert.equal(typeof nodeEnv[name], 'function', `env.${name} must be callable`);
@@ -166,8 +183,11 @@ test('exposes the audited Node env imports and reports unsupported calls explici
 
   assert.equal(typeof nodeEnv.unknown_import, 'function');
   assert.throws(() => nodeEnv.unknown_import(), /Unsupported WebAssembly import env\.unknown_import/);
-  assert.throws(() => nodeEnv.sodium_init(), /Unsupported WebAssembly import env\.sodium_init/);
-  assert.throws(() => nodeEnv.__syscall_socket(), /Unsupported WebAssembly import env\.__syscall_socket/);
+  assert.equal(typeof nodeEnv.addon_specific_import, 'function');
+  assert.throws(
+    () => nodeEnv.addon_specific_import(),
+    /Unsupported WebAssembly import env\.addon_specific_import/
+  );
 });
 
 test('runs real WASM env callbacks and cancels work on dispose and rebind', async () => {
