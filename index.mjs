@@ -139,62 +139,18 @@ export class Environment {
   }
 
   setPointer(ptr, value) {
-    this.u32[ptr >> 2] = value;
+    this.view.setUint32(ptr, value, true);
     return NAPI_OK;
   }
 
-  _u32 = new Uint32Array();
-  get u32() {
-    if (this._u32.byteLength === 0) {
-      this._u32 = new Uint32Array(this.instance.exports.memory.buffer);
+  _view = null;
+  get view() {
+    let buffer = this.instance.exports.memory.buffer;
+    if (!this._view || this._view.buffer !== buffer) {
+      this._view = new DataView(buffer);
     }
 
-    return this._u32;
-  }
-
-  _i32 = new Int32Array();
-  get i32() {
-    if (this._i32.byteLength === 0) {
-      this._i32 = new Int32Array(this.instance.exports.memory.buffer);
-    }
-
-    return this._i32;
-  }
-
-  _u16 = new Uint16Array();
-  get u16() {
-    if (this._u16.byteLength === 0) {
-      this._u16 = new Uint16Array(this.instance.exports.memory.buffer);
-    }
-
-    return this._u16;
-  }
-
-  _u64 = new BigUint64Array();
-  get u64() {
-    if (this._u64.byteLength === 0) {
-      this._u64 = new BigUint64Array(this.instance.exports.memory.buffer);
-    }
-
-    return this._u64;
-  }
-
-  _i64 = new BigInt64Array();
-  get i64() {
-    if (this._i64.byteLength === 0) {
-      this._i64 = new BigInt64Array(this.instance.exports.memory.buffer);
-    }
-
-    return this._i64;
-  }
-
-  _f64 = new Float64Array();
-  get f64() {
-    if (this._f64.byteLength === 0) {
-      this._f64 = new Float64Array(this.instance.exports.memory.buffer);
-    }
-
-    return this._f64;
+    return this._view;
   }
 
   _buf = new Uint8Array();
@@ -279,15 +235,15 @@ export class Environment {
 
   readPropertyDescriptor(ptr) {
     // https://nodejs.org/api/n-api.html#napi_property_descriptor
-    let buf = this.u32;
-    let utf8name = buf[ptr++];
-    let nameValue = buf[ptr++];
-    let method = buf[ptr++];
-    let getter = buf[ptr++];
-    let setter = buf[ptr++];
-    let val = buf[ptr++];
-    let attrs = buf[ptr++];
-    let data = buf[ptr++];
+    let view = this.view;
+    let utf8name = view.getUint32(ptr, true);
+    let nameValue = view.getUint32(ptr + 4, true);
+    let method = view.getUint32(ptr + 8, true);
+    let getter = view.getUint32(ptr + 12, true);
+    let setter = view.getUint32(ptr + 16, true);
+    let val = view.getUint32(ptr + 20, true);
+    let attrs = view.getUint32(ptr + 24, true);
+    let data = view.getUint32(ptr + 28, true);
 
     let name = utf8name ? this.getString(utf8name) : this.get(nameValue);
     let writable = Boolean(attrs & NAPI_WRITABLE);
@@ -476,11 +432,11 @@ export const napi = {
   napi_define_properties(env_id, object, property_count, properties) {
     let env = environments[env_id];
     let obj = env.get(object);
-    let ptr = properties >> 2;
+    let ptr = properties;
     for (let i = 0; i < property_count; i++) {
       let descriptor = env.readPropertyDescriptor(ptr);
       Object.defineProperty(obj, descriptor.name, descriptor);
-      ptr += 8;
+      ptr += 32;
     }
     return NAPI_OK;
   },
@@ -510,7 +466,7 @@ export const napi = {
       configurable: true
     });
 
-    let ptr = properties >> 2;
+    let ptr = properties;
     for (let i = 0; i < property_count; i++) {
       let descriptor = env.readPropertyDescriptor(ptr);
       if (descriptor.static) {
@@ -518,7 +474,7 @@ export const napi = {
       } else {
         Object.defineProperty(func.prototype, descriptor.name, descriptor);
       }
-      ptr += 8;
+      ptr += 32;
     }
 
     return env.createValue(func, result);
@@ -601,7 +557,7 @@ export const napi = {
     if (typeof val !== "number") {
       return NAPI_NUMBER_EXPECTED;
     }
-    env.i32[result >> 2] = val;
+    env.view.setInt32(result, val, true);
     return NAPI_OK;
   },
   napi_create_uint32(env_id, value, result) {
@@ -626,7 +582,7 @@ export const napi = {
     if (typeof val !== "number") {
       return NAPI_NUMBER_EXPECTED;
     }
-    env.i64[result >> 3] = val;
+    env.view.setBigInt64(result, Number.isFinite(val) ? BigInt.asIntN(64, BigInt(Math.trunc(val))) : 0n, true);
     return NAPI_OK;
   },
   napi_create_double(env_id, value, result) {
@@ -639,7 +595,7 @@ export const napi = {
     if (typeof val !== "number") {
       return NAPI_NUMBER_EXPECTED;
     }
-    env.f64[result >> 3] = val;
+    env.view.setFloat64(result, val, true);
     return NAPI_OK;
   },
   napi_create_bigint_int64(env_id, value, result) {
@@ -652,7 +608,7 @@ export const napi = {
     if (typeof val !== "bigint") {
       return NAPI_BIGINT_EXPECTED;
     }
-    env.i64[result >> 3] = val;
+    env.view.setBigInt64(result, val, true);
     if (lossless) {
       env.memory[lossless] = BigInt.asIntN(64, val) === val ? 1 : 0;
     }
@@ -668,7 +624,7 @@ export const napi = {
     if (typeof val !== "bigint") {
       return NAPI_BIGINT_EXPECTED;
     }
-    env.u64[result >> 3] = val;
+    env.view.setBigUint64(result, val, true);
     if (lossless) {
       env.memory[lossless] = BigInt.asUintN(64, val) === val ? 1 : 0;
     }
@@ -676,13 +632,12 @@ export const napi = {
   },
   napi_create_bigint_words(env_id, sign_bit, word_count, words, result) {
     let env = environments[env_id];
-    let buf = env.u64;
-    let ptr = words >> 3;
+    let view = env.view;
     let res = 0n;
     let shift = 0n;
 
     for (let i = 0; i < word_count; i++) {
-      let word = buf[ptr++];
+      let word = view.getBigUint64(words + i * 8, true);
       res += word << shift;
       shift += 64n;
     }
@@ -697,23 +652,22 @@ export const napi = {
       return NAPI_BIGINT_EXPECTED;
     }
 
-    let count = env.u32[word_count >> 2];
+    let count = env.view.getUint32(word_count, true);
 
     if (sign_bit) {
-      env.i32[sign_bit] = val < 0n ? 1 : 0;
+      env.view.setInt32(sign_bit, val < 0n ? 1 : 0, true);
     }
 
     let i = 0;
     if (words) {
       let mask = (1n << 64n) - 1n;
-      let buf = env.u64;
-      let ptr = words >> 3;
+      let view = env.view;
       if (val < 0n) {
         val = -val;
       }
 
       for (; i < count && val !== 0n; i++) {
-        buf[ptr++] = val & mask;
+        view.setBigUint64(words + i * 8, val & mask, true);
         val >>= 64n;
       }
     }
@@ -793,9 +747,9 @@ export const napi = {
     let thisArg = env.get(recv);
     let fn = env.get(func);
     let args = new Array(argc);
-    let mem = env.u32;
+    let view = env.view;
     for (let i = 0; i < argc; i++) {
-      args[i] = env.get(mem[argv >> 2]);
+      args[i] = env.get(view.getUint32(argv, true));
       argv += 4;
     }
 
@@ -811,9 +765,9 @@ export const napi = {
     let env = environments[env_id];
     let Class = env.get(cons);
     let args = new Array(argc);
-    let mem = env.u32;
+    let view = env.view;
     for (let i = 0; i < argc; i++) {
-      args[i] = env.get(mem[argv >> 2]);
+      args[i] = env.get(view.getUint32(argv, true));
       argv += 4;
     }
 
@@ -1172,14 +1126,12 @@ export const napi = {
     if (buf == 0) {
       return env.setPointer(result, val.length);
     }
-    let mem = env.u16;
-    let ptr = buf >> 1;
+    let view = env.view;
     let len = Math.min(val.length, bufsize - 1);
     for (let i = 0; i < len; i++) {
-      let code = val.charCodeAt(i);
-      mem[ptr++] = code;
+      view.setUint16(buf + i * 2, val.charCodeAt(i), true);
     }
-    mem[ptr] = 0; // null terminate
+    view.setUint16(buf + len * 2, 0, true); // null terminate
     return env.setPointer(result, len);
   },
   napi_create_date(env_id, time, result) {
@@ -1189,7 +1141,7 @@ export const napi = {
   napi_get_date_value(env_id, value, result) {
     let env = environments[env_id];
     let date = env.get(value);
-    env.f64[result >> 3] = date.valueOf();
+    env.view.setFloat64(result, date.valueOf(), true);
   },
   napi_create_symbol(env_id, description, result) {
     let env = environments[env_id];
